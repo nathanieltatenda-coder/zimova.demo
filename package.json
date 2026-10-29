@@ -1,0 +1,1 @@
+{"name":"zimova","version":"0.1.0","description":"ZIMOVA - Move Your Way. Ride-hailing web app for Zimbabwe (Milestone 1).","scripts":{"start":"node server.js"},"engines":{"node":">=18"},"dependencies":{"express":"^4.19.2"}}
