@@ -67,3 +67,11 @@ Example defaults: base fare $0.50 + $0.40/km, minimum $1.50; Economy 1.00x, Comf
 - **No fare appears:** ensure both pins are inside Zimbabwe and the routing service is responding.
 
 This is a corrected local web package of the supplied ZIMOVA project. Review and test the code before any public deployment.
+
+## Phase 1 update (demo)
+
+- Fares: private trip $1.00/km (min $1.00). Driver 90%, ZIMOVA 10%, no passenger fee. Shared rate ($0.90/km) is stored in settings; shared trips arrive in phase 2.
+- Towns: Harare, Bulawayo, Mutare, Gweru, Masvingo, Kwekwe, Chinhoyi, Karoi, Kariba. Boundaries are rough demo polygons; edit them in Admin > Towns.
+- A ride request is only visible to approved, online drivers whose approved town matches the pickup town. Pickups outside an active town are refused.
+- Existing data files are upgraded automatically on start (drivers default to Harare; pricing resets to the new rates).
+- Still demo: JSON storage (PostgreSQL planned), simulated payments, OpenStreetMap maps (Google Maps planned).
