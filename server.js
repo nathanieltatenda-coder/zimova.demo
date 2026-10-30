@@ -1,5 +1,6 @@
 // ZIMOVA Milestone 1 server. JSON-file storage (demo only) -> replace with PostgreSQL in Milestone 3.
 const express = require('express'), crypto = require('crypto'), fs = require('fs'), path = require('path');
+try { fs.readFileSync(path.join(__dirname, '.env'), 'utf8').split(/\r?\n/).forEach(l => { const m = l.match(/^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$/); if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^["']|["']$/g, ''); }); } catch {}   // minimal .env loader
 const PORT = process.env.PORT || 3000, OSRM = process.env.OSRM_URL || 'https://router.project-osrm.org';
 const DB_FILE = path.join(__dirname, 'data', 'db.json');
 let db;
@@ -40,7 +41,8 @@ const townAt = p => db.towns.find(t => t.active && inPoly(p, t.polygon));
 const NOTOWN = 'ZIMOVA does not operate at this pickup location yet. Choose a pickup inside a gold service area on the map.';
 function migrate() {   // upgrades older data files in place
   if (!db.towns) db.towns = SEED_TOWNS;
-  if (db.config.sharedPerKm === undefined) db.config = { base: 0, perKm: 1, sharedPerKm: 0.9, min: 1, mult: { private: 1 }, serviceFeePct: 0, commissionPct: 10, cancelFee: 0.5, graceSeconds: 120 };
+  if (db.config.packagePerKm === undefined && db.config.sharedPerKm !== undefined) db.config.packagePerKm = 1;
+  if (db.config.sharedPerKm === undefined) db.config = { base: 0, perKm: 1, sharedPerKm: 0.9, packagePerKm: 1, min: 1, mult: { private: 1 }, serviceFeePct: 0, commissionPct: 10, cancelFee: 0.5, graceSeconds: 120 };
   db.users.forEach(u => { if (u.role === 'driver' && !u.townId) u.townId = 'harare'; });
   db.bookings.forEach(b => { if (!b.townId) { const t = townAt(b.from); b.townId = t ? t.id : 'harare'; } });
   save();
@@ -65,18 +67,32 @@ const audit = (u, action, detail) => { db.audit.push({ at: Date.now(), by: u.ema
 
 // ---- fares (server is authoritative)
 function fare(km, veh) {
-  const c = db.config, m = c.mult[veh]; if (!m) throw bad('Unknown vehicle category');
-  const fareC = Math.max(C((c.base + km * c.perKm) * m), C(c.min));            // multiplier, then minimum fare
+  const c = db.config, rate = { private: c.perKm, shared: c.sharedPerKm, package: c.packagePerKm ?? c.perKm }[veh]; if (rate === undefined) throw bad('Unknown booking type');
+  const fareC = Math.max(C(c.base + km * rate), C(c.min));            // multiplier, then minimum fare
   const feeC = Math.round(fareC * c.serviceFeePct / 100), commissionC = Math.round(fareC * c.commissionPct / 100);
   return { km, vehicle: veh, fareC, feeC, totalC: fareC + feeC, commissionC, driverC: fareC - commissionC,   // driver + commission = fare exactly
-    rates: { base: c.base, perKm: c.perKm, min: c.min, mult: m, serviceFeePct: c.serviceFeePct, commissionPct: c.commissionPct } };
+    rates: { base: c.base, perKm: rate, min: c.min, mult: 1, serviceFeePct: c.serviceFeePct, commissionPct: c.commissionPct } };
 }
 const inZW = p => p && isFinite(p.lat) && isFinite(p.lng) && p.lat >= -22.6 && p.lat <= -15.5 && p.lng >= 25 && p.lng <= 33.3;
 function pts(b) {
   const a = b.from && { lat: +b.from.lat, lng: +b.from.lng }, z = b.to && { lat: +b.to.lat, lng: +b.to.lng };
   if (!inZW(a) || !inZW(z)) throw bad('Pickup and destination must both be inside Zimbabwe'); return [a, z];
 }
-async function route(a, b) {   // real road routing; on failure we error out, never fall back to straight-line
+function decodePoly(str) {   // Google encoded polyline -> [[lng,lat],...]
+  let i = 0, lat = 0, lng = 0; const out = [];
+  while (i < str.length) { for (const k of [0, 1]) { let sh = 0, r = 0, c; do { c = str.charCodeAt(i++) - 63; r |= (c & 31) << sh; sh += 5; } while (c >= 32); const d = (r & 1) ? ~(r >> 1) : (r >> 1); if (k === 0) lat += d; else lng += d; } out.push([lng / 1e5, lat / 1e5]); }
+  return out;
+}
+async function googleRoute(a, b) {   // Routes API, server-side key only; never sent to the browser
+  let j; try { j = await (await fetch(process.env.ROUTES_URL || 'https://routes.googleapis.com/directions/v2:computeRoutes', { method: 'POST', signal: AbortSignal.timeout(12000),
+    headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': process.env.GOOGLE_MAPS_SERVER_KEY, 'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline' },
+    body: JSON.stringify({ origin: { location: { latLng: { latitude: a.lat, longitude: a.lng } } }, destination: { location: { latLng: { latitude: b.lat, longitude: b.lng } } }, travelMode: 'DRIVE' }) })).json(); }
+  catch { throw bad('Routing service unavailable. No road distance or fare can be confirmed right now.', 502); }
+  const r = j.routes && j.routes[0]; if (!r || !r.polyline) throw bad('No road route found between these points.', 422);
+  return { km: Math.round(r.distanceMeters / 10) / 100, min: Math.round(parseInt(r.duration) / 60), geometry: decodePoly(r.polyline.encodedPolyline) };
+}
+async function route(a, b) {
+  if (process.env.GOOGLE_MAPS_SERVER_KEY) return googleRoute(a, b);   // real road routing; on failure we error out, never fall back to straight-line
   let j; try { j = await (await fetch(`${OSRM}/route/v1/driving/${a.lng},${a.lat};${b.lng},${b.lat}?overview=full&geometries=geojson`, { signal: AbortSignal.timeout(12000) })).json(); }
   catch { throw bad('Routing service unavailable. No road distance or fare can be confirmed right now.', 502); }
   if (j.code !== 'Ok' || !j.routes?.[0]) throw bad('No road route found between these points (map coverage may be incomplete there).', 422);
@@ -118,41 +134,77 @@ app.post('/api/auth/register', register('passenger'));
 app.post('/api/auth/driver-register', register('driver'));
 app.get('/api/me', auth(), (req, res) => res.json({ user: pub(req.user) }));
 app.get('/api/config', auth(), (req, res) => res.json(db.config));
+app.get('/api/map-config', (req, res) => res.json(process.env.GOOGLE_MAPS_BROWSER_KEY ? { provider: 'google', key: process.env.GOOGLE_MAPS_BROWSER_KEY } : { provider: 'osm' }));
+app.post('/api/driver/location', auth('driver'), wrap((req, res) => {   // only accepted while the driver has an active trip
+  const p = { lat: +req.body.lat, lng: +req.body.lng }; if (!inZW(p)) throw bad('Location outside Zimbabwe');
+  if (!db.bookings.some(b => b.driverId === req.user.id && ['accepted', 'arrived', 'in_progress'].includes(b.status))) { delete LOC[req.user.id]; return res.status(409).json({ error: 'No active trip. Location sharing has stopped.', stop: true }); }
+  LOC[req.user.id] = { ...p, at: Date.now() }; res.json({ ok: true });
+}));
 app.get('/api/towns', (req, res) => res.json(db.towns.filter(t => t.active)));
 
 app.post('/api/quote', auth('passenger'), wrap(async (req, res) => {
   const [a, z] = pts(req.body), tn = townAt(a); if (!tn) throw bad(NOTOWN, 422);
   const r = await route(a, z);
-  res.json({ ...r, town: tn.name, fares: Object.fromEntries(Object.keys(db.config.mult).map(v => [v, fare(r.km, v)])) });
+  res.json({ ...r, town: tn.name, fares: Object.fromEntries(['private', 'shared', 'package'].map(v => [v, fare(r.km, v)])) });
 }));
 
 // ---- bookings
 const drvRating = id => { const r = db.bookings.filter(b => b.driverId === id && b.rating).map(b => b.rating.stars); return r.length ? { avg: Math.round(r.reduce((a, c) => a + c, 0) / r.length * 10) / 10, count: r.length } : null; };
+const LOC = {};   // live driver positions, memory only, exist only while a trip is active
+const liveLoc = b => ['accepted', 'arrived', 'in_progress'].includes(b.status) && b.driverId && LOC[b.driverId] && Date.now() - LOC[b.driverId].at < 120000 ? LOC[b.driverId] : null;
 const LIVE = ['searching', 'accepted', 'arrived', 'in_progress'];
 const bk = id => db.bookings.find(b => b.id === id) || (() => { throw bad('Booking not found', 404); })();
 function view(b, full) {
-  const { geometry, pin, ...r } = b, d = b.driverId && db.users.find(u => u.id === b.driverId), p = db.users.find(u => u.id === b.passengerId);
-  return { ...(full ? (({ pin, ...x }) => x)(b) : r), driver: d && { name: d.name, phone: d.phone, vehicle: d.driver.vehicle, rating: drvRating(d.id) }, passenger: p && { name: p.name } };
+  const { geometry, pin, dcode, ...r } = b, d = b.driverId && db.users.find(u => u.id === b.driverId), p = db.users.find(u => u.id === b.passengerId);
+  return { ...(full ? (({ pin, dcode, ...x }) => x)(b) : r), driver: d && { name: d.name, phone: d.phone, vehicle: d.driver.vehicle, rating: drvRating(d.id) }, passenger: p && { name: b.type === 'shared' ? p.name.split(' ')[0] : p.name }, driverLoc: liveLoc(b) };
+}
+// ---- booking types: private | shared | package | someone (ride for someone else)
+const PROHIBITED = /\b(gun|firearm|pistol|rifle|ammo|ammunition|explosive|bomb|grenade|dynamite|fireworks|drug|cocaine|heroin|marijuana|cannabis|dagga|mbanje|poison|acid|petrol|diesel|fuel|weapon|knife)s?\b/i;
+const CATS = ['documents', 'clothing', 'food', 'electronics', 'groceries', 'other'], SIZES = ['small', 'medium', 'large'];
+function validateExtra(type, b) {
+  if (type === 'someone') { const r = b.rider || {}; if (!str(r.name, 2, 60) || !str(r.phone, 7, 20)) throw bad("Enter the passenger's name and phone number"); return { rider: { name: r.name.trim(), phone: r.phone.trim() } }; }
+  if (type === 'shared') { if (b.consent !== true) throw bad('Please agree to share the vehicle with other passengers'); return { sharedConsentAt: Date.now() }; }
+  if (type === 'package') {
+    const p = b.pkg || {}, w = +p.weightKg;
+    if (!str(p.senderName, 2, 60) || !str(p.senderPhone, 7, 20) || !str(p.recipientName, 2, 60) || !str(p.recipientPhone, 7, 20)) throw bad('Sender and recipient names and phone numbers are required');
+    if (!str(p.description, 3, 200)) throw bad('Describe what is in the package');
+    if (!CATS.includes(p.category) || !SIZES.includes(p.size) || !(w > 0 && w <= 50)) throw bad('Choose a category, a size and a weight up to 50 kg');
+    if (p.noProhibited !== true || PROHIBITED.test(p.description + ' ' + (p.instructions || ''))) throw bad('Dangerous or illegal items (weapons, drugs, explosives, fuel, poisons) cannot be sent with ZIMOVA');
+    return { pkg: { senderName: p.senderName.trim(), senderPhone: p.senderPhone.trim(), recipientName: p.recipientName.trim(), recipientPhone: p.recipientPhone.trim(), description: p.description.trim(),
+      category: p.category, size: p.size, weightKg: w, instructions: String(p.instructions || '').slice(0, 200) }, dcode: String(crypto.randomInt(1000, 10000)) };
+  }
+  return {};
+}
+const hav = (p, q) => { const R = 6371, r = x => x * Math.PI / 180, dl = r(q.lat - p.lat), dn = r(q.lng - p.lng), h = Math.sin(dl / 2) ** 2 + Math.cos(r(p.lat)) * Math.cos(r(q.lat)) * Math.sin(dn / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(h)); };
+const OPEN = ['searching', 'accepted', 'arrived'];
+function matchGroup(a, z, townId) {   // compatible route: pickups within 3 km, destinations within 5 km, same town, seats left
+  for (const c of db.bookings.filter(x => x.type === 'shared' && x.townId === townId && OPEN.includes(x.status) && hav(x.from, a) <= 3 && hav(x.to, z) <= 5)) {
+    const mem = db.bookings.filter(x => x.groupId === c.groupId && OPEN.includes(x.status)), withDrv = mem.find(m => m.driverId);
+    const cap = withDrv ? db.users.find(u => u.id === withDrv.driverId).driver.vehicle.capacity - 1 : 3;
+    if (mem.length < cap) return { gid: c.groupId, driverId: withDrv && withDrv.driverId };
+  }
 }
 app.post('/api/bookings', auth('passenger'), wrap(async (req, res) => {
   const [a, z] = pts(req.body), b = req.body, tn = townAt(a); if (!tn) throw bad(NOTOWN, 422);
   if (!['ecocash', 'visa', 'mastercard'].includes(b.pay)) throw bad('Choose a payment method');
   if (db.bookings.some(x => x.passengerId === req.user.id && LIVE.includes(x.status))) throw bad('You already have an active booking', 409);
-  const r = await route(a, z), f = fare(r.km, b.vehicle);        // fare recomputed on the server, browser values ignored
+  const type = ['private', 'shared', 'package', 'someone'].includes(b.type) ? b.type : 'private', extra = validateExtra(type, b);
+  const r = await route(a, z), f = fare(r.km, type === 'someone' ? 'private' : type);        // fare recomputed on the server, browser values ignored
   const bo = { id: 'b' + (++db.seq), passengerId: req.user.id, from: a, to: z, fromName: String(b.fromName || '').slice(0, 120), toName: String(b.toName || '').slice(0, 120),
-    status: 'searching', townId: tn.id, pin: String(crypto.randomInt(1000, 10000)), etaMin: r.min, geometry: r.geometry, ...f, payment: { status: 'unpaid', method: b.pay, simulated: true }, createdAt: Date.now() };
-  db.bookings.push(bo); save(); res.json({ ...view(bo), pin: bo.pin });
+    status: 'searching', type, ...extra, townId: tn.id, pin: String(crypto.randomInt(1000, 10000)), etaMin: r.min, geometry: r.geometry, ...f, payment: { status: 'unpaid', method: b.pay, simulated: true }, createdAt: Date.now() };
+  if (type === 'shared') { const m = matchGroup(a, z, tn.id); bo.groupId = m ? m.gid : bo.id; if (m && m.driverId) { bo.driverId = m.driverId; bo.acceptedAt = Date.now(); bo.status = 'accepted'; } }
+  db.bookings.push(bo); save(); res.json({ ...view(bo), pin: bo.pin, dcode: bo.dcode });
 }));
 app.get('/api/bookings', auth(), (req, res) => {
   const u = req.user; let l = db.bookings;
   if (u.role === 'passenger') l = l.filter(b => b.passengerId === u.id);
   else if (u.role === 'driver') l = l.filter(b => b.driverId === u.id || (b.status === 'searching' && u.status === 'approved' && b.townId === u.townId));
-  res.json(l.slice().sort((a, b) => b.createdAt - a.createdAt).map(b => u.role === 'passenger' ? { ...view(b), pin: b.pin } : view(b)));
+  res.json(l.slice().sort((a, b) => b.createdAt - a.createdAt).map(b => u.role === 'passenger' ? { ...view(b), pin: b.pin, dcode: b.dcode } : view(b)));
 });
 app.get('/api/bookings/:id', auth(), wrap((req, res) => {
   const b = bk(req.params.id), u = req.user;
   const ok = u.role === 'admin' || b.passengerId === u.id || b.driverId === u.id || (u.role === 'driver' && u.status === 'approved' && b.status === 'searching' && b.townId === u.townId);
-  if (!ok) throw bad('Not allowed', 403); res.json(u.role === 'passenger' ? { ...view(b, true), pin: b.pin } : view(b, true));
+  if (!ok) throw bad('Not allowed', 403); res.json(u.role === 'passenger' ? { ...view(b, true), pin: b.pin, dcode: b.dcode } : view(b, true));
 }));
 const T = { accept: ['searching', 'accepted'], arrive: ['accepted', 'arrived'], start: ['arrived', 'in_progress'], complete: ['in_progress', 'completed'] };
 app.post('/api/bookings/:id/:action(accept|arrive|start|complete)', auth('driver'), wrap((req, res) => {
@@ -164,9 +216,12 @@ app.post('/api/bookings/:id/:action(accept|arrive|start|complete)', auth('driver
     if (b.townId !== u.townId) throw bad('This pickup is outside your approved town', 403);
     if (db.bookings.some(x => x.driverId === u.id && ['accepted', 'arrived', 'in_progress'].includes(x.status))) throw bad('Finish your current trip first', 409);
     b.driverId = u.id; b.acceptedAt = Date.now();
+    if (b.type === 'shared') { const cap = Math.max(u.driver.vehicle.capacity - 1, 1);   // passengers who matched the same route ride together
+      db.bookings.filter(x => x !== b && x.groupId === b.groupId && x.status === 'searching' && x.townId === u.townId).forEach((x, i) => { if (i + 2 <= cap) { x.driverId = u.id; x.acceptedAt = Date.now(); x.status = 'accepted'; } else x.groupId = x.id; }); }
   } else if (b.driverId !== u.id) throw bad('Not your trip', 403);
   if (a === 'start' && b.pin && String(req.body.pin || '') !== b.pin) throw bad('Incorrect ride PIN. Ask the passenger for their 4-digit PIN.', 403);   // trust: right driver, right passenger
-  b.status = to; if (a === 'complete') { b.completedAt = Date.now(); b.payment = { ...b.payment, status: 'pending' }; }
+  if (a === 'complete' && b.type === 'package' && String(req.body.dcode || '') !== b.dcode) throw bad('Incorrect delivery code. Ask the recipient for their 4-digit code.', 403);
+  b.status = to; if (a === 'complete') { b.completedAt = Date.now(); if (!db.bookings.some(x => x !== b && x.driverId === u.id && ['accepted', 'arrived', 'in_progress'].includes(x.status))) delete LOC[u.id]; b.payment = { ...b.payment, status: 'pending' }; }
   save(); res.json(view(b));
 }));
 const cancelFee = b => b.status === 'searching' ? 0 : (Date.now() - b.acceptedAt <= db.config.graceSeconds * 1000 ? 0 : C(db.config.cancelFee));
@@ -215,7 +270,7 @@ app.post('/api/bookings/:id/share', auth('passenger'), wrap((req, res) => {
 app.get('/api/share/:code', wrap((req, res) => {   // public, read-only, unguessable link
   const b = db.bookings.find(x => x.shareCode && x.shareCode === req.params.code); if (!b) throw bad('Link not found', 404);
   const d = b.driverId && db.users.find(u => u.id === b.driverId);
-  res.json({ status: b.status, fromName: b.fromName, toName: b.toName, from: b.from, to: b.to, geometry: b.geometry, etaMin: b.etaMin, driver: d && { name: d.name.split(' ')[0], vehicle: d.driver.vehicle } });
+  res.json({ status: b.status, fromName: b.fromName, toName: b.toName, from: b.from, to: b.to, geometry: b.geometry, etaMin: b.etaMin, driverLoc: liveLoc(b), driver: d && { name: d.name.split(' ')[0], vehicle: d.driver.vehicle } });
 }));
 app.post('/api/bookings/:id/sos', auth('passenger', 'driver'), wrap((req, res) => {
   const b = bk(req.params.id), u = req.user; if (b.passengerId !== u.id && b.driverId !== u.id) throw bad('Not allowed', 403);
@@ -246,7 +301,7 @@ app.post('/api/admin/drivers/:id/status', A, wrap((req, res) => {
 }));
 app.put('/api/admin/config', A, wrap((req, res) => {
   const n = req.body, ok = (v, lo = 0, hi = 1e6) => typeof v === 'number' && isFinite(v) && v >= lo && v <= hi;
-  if (!ok(n.base) || !ok(n.perKm) || !ok(n.sharedPerKm) || !ok(n.min) || !ok(n.serviceFeePct, 0, 50) || !ok(n.commissionPct, 0, 50) || !ok(n.cancelFee) || !ok(n.graceSeconds, 0, 3600)) throw bad('Invalid pricing values');
+  if (!ok(n.base) || !ok(n.perKm) || !ok(n.sharedPerKm) || !ok(n.packagePerKm) || !ok(n.min) || !ok(n.serviceFeePct, 0, 50) || !ok(n.commissionPct, 0, 50) || !ok(n.cancelFee) || !ok(n.graceSeconds, 0, 3600)) throw bad('Invalid pricing values');
   const old = JSON.stringify(db.config); db.config = { ...db.config, ...n, mult: db.config.mult };
   audit(req.user, 'config_change', `${old} -> ${JSON.stringify(db.config)}`); save(); res.json(db.config);   // past bookings keep the rates they were priced with
 }));

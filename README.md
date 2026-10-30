@@ -75,3 +75,39 @@ This is a corrected local web package of the supplied ZIMOVA project. Review and
 - A ride request is only visible to approved, online drivers whose approved town matches the pickup town. Pickups outside an active town are refused.
 - Existing data files are upgraded automatically on start (drivers default to Harare; pricing resets to the new rates).
 - Still demo: JSON storage (PostgreSQL planned), simulated payments, OpenStreetMap maps (Google Maps planned).
+
+## Phase 2 update (demo)
+
+- Four booking options: Private ($1/km), Shared ($0.90/km per passenger, own route only), Package delivery (rate in Admin > Pricing, default $1/km) and Ride for someone else (private rate).
+- Shared matching: same town, pickups within 3 km, destinations within 5 km, seats left (car seats minus the driver). Passengers must consent, and other riders only see a first name. If the driver already accepted, a later match joins that driver automatically.
+- Packages: sender/recipient details, category, size, weight, instructions and a no-dangerous-items declaration (also screened for banned words). A collection code (sender to driver) starts the job and a delivery code (recipient to driver) completes it.
+- Ride for someone else: the driver sees the rider's name and phone; the booker pays.
+
+## Phase 3: Google Maps (works with placeholders until you add keys)
+
+With no keys the app keeps using OpenStreetMap, so nothing breaks. Add keys to switch on Google Maps.
+
+### Setup
+1. Create a project in Google Cloud Console and **enable billing** (Google Maps Platform requires it, even if usage stays inside the free monthly caps).
+2. Enable: Maps JavaScript API, Places API (New), Geocoding API, Routes API.
+3. Create **two keys**:
+   - Browser key, restricted by *HTTP referrers* (your domain, plus http://localhost:3000/* for testing) and limited to Maps JavaScript, Places (New) and Geocoding.
+   - Server key, restricted by *server IP address* and limited to Routes API only.
+4. Copy `.env.example` to `.env`, fill `GOOGLE_MAPS_BROWSER_KEY` and `GOOGLE_MAPS_SERVER_KEY`, restart the server.
+5. Set a budget alert and quota caps in Google Cloud so a bug or abuse cannot create a surprise bill.
+
+The server key is only used on the server (fares use the Routes API driving distance). Only the browser key is sent to the page, which is normal for Maps JavaScript and is why it must be referrer-restricted.
+
+### What it does
+- Passenger map with current-location detection (after browser permission), draggable pins, address search, driving route, and a Standard/Satellite toggle (Google's own hybrid map; keep Google's logo and attribution visible).
+- Fares use real driving distance from the Routes API (OSRM when no server key).
+- Live driver location: the driver's browser sends GPS only while a trip is active; passengers (and a share link) see it animate on the map; it stops and is deleted when the trip ends, and the server refuses location updates without an active trip.
+- Drivers get a "Navigate to pickup / destination" button that opens Google Maps turn-by-turn directions.
+- Web limitation: a browser only reports GPS while the driver page is open and the screen is on. Reliable background tracking needs a native or installed app later.
+
+### Cost notes (check Google's pricing page before launch; prices and free caps change)
+Google bills per request type (SKU) with a separate free monthly allowance for each. At the time of writing the main ones were: Maps JavaScript loads and Geocoding about 10,000 free per month each, then roughly $7 and $5 per 1,000; Routes (Essentials) about 10,000 free then roughly $5 per 1,000. Places search is billed per SKU depending on the fields requested.
+Rough usage per trip: about 2 map loads (passenger + driver), 1 to 4 route quotes, a few reverse-geocode labels and 1 to 2 searches. Multiply by expected monthly trips and compare against the current price table at https://developers.google.com/maps/billing-and-pricing/pricing. Use the Google Cloud pricing calculator for a proper estimate.
+
+### Not verified here
+I had no Google key, so the Google code path (map drawing, markers, search, satellite toggle) has not been run against real Google services. The server side (Routes request, polyline decoding, live location rules) was tested with a stand-in service. Expect to fix small issues on first run with your key.
