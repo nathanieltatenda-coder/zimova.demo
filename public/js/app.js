@@ -13,7 +13,7 @@ async function api(p, method = 'GET', body) {
   const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Request failed'); return j;
 }
 const form = f => Object.fromEntries(new FormData(f));
-const go = async v => { cancelAnimationFrame(carRaf); carFor = null; scrollTo({ top: 0 }); clearInterval(timer); timer = null; if (map) { map.remove(); map = null; } layers = {}; P = {}; shownRoute = null; main.onclick = null; main.innerHTML = ''; nav();
+const go = async v => { cancelAnimationFrame(carRaf); carFor = null; scrollTo({ top: 0 }); clearInterval(timer); timer = null; if (map) { map.remove(); map = null; } layers = {}; P = {}; shownRoute = null; main.onclick = null; main.onchange = null; main.innerHTML = ''; nav();
   try { await views[v](); } catch (e) { toast(e.message); } };
 const home = () => go(!me ? 'welcome' : { passenger: 'passenger', driver: 'driver', admin: 'admin' }[me.role]);
 function nav() {
@@ -38,7 +38,7 @@ function drawBooking(g) {   // route + pins for a booking with geometry
 function breakdown(b) {
   const r = b.rates || {};
   return `<table><tr><td>Original fare (${b.km} km, ${esc(b.vehicle)})</td><td class="r">${money(b.fareC)}</td></tr>
-  <tr><td>Passenger service fee (${r.serviceFeePct}%)</td><td class="r">${money(b.feeC)}</td></tr>
+  ${r.serviceFeePct ? `<tr><td>Passenger service fee (${r.serviceFeePct}%)</td><td class="r">${money(b.feeC)}</td></tr>` : ''}
   <tr class="tot"><td>Total passenger payment</td><td class="r">${money(b.totalC)}</td></tr>
   <tr><td>Driver earnings (${100 - r.commissionPct}% of fare)</td><td class="r">${money(b.driverC)}</td></tr>
   <tr><td>Platform commission (${r.commissionPct}% of fare)</td><td class="r">${money(b.commissionC)}</td></tr></table>`;
