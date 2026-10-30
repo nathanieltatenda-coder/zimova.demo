@@ -106,11 +106,12 @@ app.post('/api/quote', auth('passenger'), wrap(async (req, res) => {
 }));
 
 // ---- bookings
+const drvRating = id => { const r = db.bookings.filter(b => b.driverId === id && b.rating).map(b => b.rating.stars); return r.length ? { avg: Math.round(r.reduce((a, c) => a + c, 0) / r.length * 10) / 10, count: r.length } : null; };
 const LIVE = ['searching', 'accepted', 'arrived', 'in_progress'];
 const bk = id => db.bookings.find(b => b.id === id) || (() => { throw bad('Booking not found', 404); })();
 function view(b, full) {
-  const { geometry, ...r } = b, d = b.driverId && db.users.find(u => u.id === b.driverId), p = db.users.find(u => u.id === b.passengerId);
-  return { ...(full ? b : r), driver: d && { name: d.name, phone: d.phone, vehicle: d.driver.vehicle }, passenger: p && { name: p.name } };
+  const { geometry, pin, ...r } = b, d = b.driverId && db.users.find(u => u.id === b.driverId), p = db.users.find(u => u.id === b.passengerId);
+  return { ...(full ? (({ pin, ...x }) => x)(b) : r), driver: d && { name: d.name, phone: d.phone, vehicle: d.driver.vehicle, rating: drvRating(d.id) }, passenger: p && { name: p.name } };
 }
 app.post('/api/bookings', auth('passenger'), wrap(async (req, res) => {
   const [a, z] = pts(req.body), b = req.body;
@@ -118,19 +119,19 @@ app.post('/api/bookings', auth('passenger'), wrap(async (req, res) => {
   if (db.bookings.some(x => x.passengerId === req.user.id && LIVE.includes(x.status))) throw bad('You already have an active booking', 409);
   const r = await route(a, z), f = fare(r.km, b.vehicle);        // fare recomputed on the server, browser values ignored
   const bo = { id: 'b' + (++db.seq), passengerId: req.user.id, from: a, to: z, fromName: String(b.fromName || '').slice(0, 120), toName: String(b.toName || '').slice(0, 120),
-    status: 'searching', etaMin: r.min, geometry: r.geometry, ...f, payment: { status: 'unpaid', method: b.pay, simulated: true }, createdAt: Date.now() };
-  db.bookings.push(bo); save(); res.json(view(bo));
+    status: 'searching', pin: String(crypto.randomInt(1000, 10000)), etaMin: r.min, geometry: r.geometry, ...f, payment: { status: 'unpaid', method: b.pay, simulated: true }, createdAt: Date.now() };
+  db.bookings.push(bo); save(); res.json({ ...view(bo), pin: bo.pin });
 }));
 app.get('/api/bookings', auth(), (req, res) => {
   const u = req.user; let l = db.bookings;
   if (u.role === 'passenger') l = l.filter(b => b.passengerId === u.id);
   else if (u.role === 'driver') l = l.filter(b => b.driverId === u.id || (b.status === 'searching' && u.status === 'approved'));
-  res.json(l.slice().sort((a, b) => b.createdAt - a.createdAt).map(b => view(b)));
+  res.json(l.slice().sort((a, b) => b.createdAt - a.createdAt).map(b => u.role === 'passenger' ? { ...view(b), pin: b.pin } : view(b)));
 });
 app.get('/api/bookings/:id', auth(), wrap((req, res) => {
   const b = bk(req.params.id), u = req.user;
   const ok = u.role === 'admin' || b.passengerId === u.id || b.driverId === u.id || (u.role === 'driver' && u.status === 'approved' && b.status === 'searching');
-  if (!ok) throw bad('Not allowed', 403); res.json(view(b, true));
+  if (!ok) throw bad('Not allowed', 403); res.json(u.role === 'passenger' ? { ...view(b, true), pin: b.pin } : view(b, true));
 }));
 const T = { accept: ['searching', 'accepted'], arrive: ['accepted', 'arrived'], start: ['arrived', 'in_progress'], complete: ['in_progress', 'completed'] };
 app.post('/api/bookings/:id/:action(accept|arrive|start|complete)', auth('driver'), wrap((req, res) => {
@@ -142,6 +143,7 @@ app.post('/api/bookings/:id/:action(accept|arrive|start|complete)', auth('driver
     if (db.bookings.some(x => x.driverId === u.id && ['accepted', 'arrived', 'in_progress'].includes(x.status))) throw bad('Finish your current trip first', 409);
     b.driverId = u.id; b.acceptedAt = Date.now();
   } else if (b.driverId !== u.id) throw bad('Not your trip', 403);
+  if (a === 'start' && b.pin && String(req.body.pin || '') !== b.pin) throw bad('Incorrect ride PIN. Ask the passenger for their 4-digit PIN.', 403);   // trust: right driver, right passenger
   b.status = to; if (a === 'complete') { b.completedAt = Date.now(); b.payment = { ...b.payment, status: 'pending' }; }
   save(); res.json(view(b));
 }));
@@ -175,6 +177,30 @@ app.post('/api/bookings/:id/pay', auth('passenger'), wrap((req, res) => {
   save(); res.json(view(b));
 }));
 
+// ---- trust & safety: rating, share-trip link, SOS
+app.post('/api/bookings/:id/rate', auth('passenger'), wrap((req, res) => {
+  const b = bk(req.params.id), n = Math.round(+req.body.stars);
+  if (b.passengerId !== req.user.id) throw bad('Not allowed', 403);
+  if (b.status !== 'completed') throw bad('You can rate a driver after the trip is completed', 409);
+  if (b.rating) throw bad('You already rated this trip', 409);
+  if (!(n >= 1 && n <= 5)) throw bad('Choose 1 to 5 stars');
+  b.rating = { stars: n, comment: String(req.body.comment || '').slice(0, 200), at: Date.now() }; save(); res.json(view(b));
+}));
+app.post('/api/bookings/:id/share', auth('passenger'), wrap((req, res) => {
+  const b = bk(req.params.id); if (b.passengerId !== req.user.id) throw bad('Not allowed', 403);
+  b.shareCode = b.shareCode || crypto.randomBytes(8).toString('hex'); save(); res.json({ code: b.shareCode });
+}));
+app.get('/api/share/:code', wrap((req, res) => {   // public, read-only, unguessable link
+  const b = db.bookings.find(x => x.shareCode && x.shareCode === req.params.code); if (!b) throw bad('Link not found', 404);
+  const d = b.driverId && db.users.find(u => u.id === b.driverId);
+  res.json({ status: b.status, fromName: b.fromName, toName: b.toName, from: b.from, to: b.to, geometry: b.geometry, etaMin: b.etaMin, driver: d && { name: d.name.split(' ')[0], vehicle: d.driver.vehicle } });
+}));
+app.post('/api/bookings/:id/sos', auth('passenger', 'driver'), wrap((req, res) => {
+  const b = bk(req.params.id), u = req.user; if (b.passengerId !== u.id && b.driverId !== u.id) throw bad('Not allowed', 403);
+  (db.alerts = db.alerts || []).push({ at: Date.now(), by: u.name, role: u.role, phone: u.phone, bookingId: b.id, route: b.fromName + ' → ' + b.toName, status: b.status });
+  save(); res.json({ ok: true });
+}));
+
 // ---- driver
 app.post('/api/driver/online', auth('driver'), wrap((req, res) => {
   if (req.user.status !== 'approved') throw bad('Your account is ' + req.user.status + '. Only approved drivers can go online.', 403);
@@ -184,7 +210,7 @@ app.get('/api/driver/earnings', auth('driver'), (req, res) => {
   const t = db.bookings.filter(b => b.driverId === req.user.id && b.status === 'completed').sort((a, b) => b.completedAt - a.completedAt);
   const sum = l => ({ trips: l.length, fareC: l.reduce((s, b) => s + b.fareC, 0), commissionC: l.reduce((s, b) => s + b.commissionC, 0), netC: l.reduce((s, b) => s + b.driverC, 0) });
   const d0 = new Date(); d0.setHours(0, 0, 0, 0); const m0 = new Date(d0); m0.setDate(1);
-  res.json({ today: sum(t.filter(b => b.completedAt >= d0)), month: sum(t.filter(b => b.completedAt >= m0)), all: sum(t), trips: t.slice(0, 20).map(b => view(b)) });
+  res.json({ rating: drvRating(req.user.id), today: sum(t.filter(b => b.completedAt >= d0)), month: sum(t.filter(b => b.completedAt >= m0)), all: sum(t), trips: t.slice(0, 20).map(b => view(b)) });
 });
 
 // ---- admin
@@ -215,5 +241,7 @@ app.get('/api/admin/summary', A, (req, res) => {
   res.json({ byStatus: by, paidTrips: paid.length, grossFareC: s('fareC'), feeC: s('feeC'), commissionC: s('commissionC'), driverC: s('driverC'),
     platformRevenueC: s('feeC') + s('commissionC'), passengerPaidC: s('totalC'), pendingDrivers: db.users.filter(u => u.role === 'driver' && u.status === 'pending').length });
 });
+
+app.get('/api/admin/alerts', A, (req, res) => res.json((db.alerts || []).slice().reverse().slice(0, 50)));
 
 load(); app.listen(PORT, () => console.log(`ZIMOVA running at http://localhost:${PORT}\nAdmin: admin@zimova.test / admin123   Driver: driver@zimova.test / driver123 (change in .env)`));

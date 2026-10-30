@@ -4,6 +4,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const money = c => '$' + (c / 100).toFixed(2), main = $('#main');
 const ACTIVE = ['searching', 'accepted', 'arrived', 'in_progress'];
 const LABEL = { searching: 'Searching for a driver…', accepted: 'Driver arriving', arrived: 'Driver has arrived', in_progress: 'Trip in progress', completed: 'Completed', cancelled: 'Cancelled' };
+let carRaf = 0, carFor = null;
 let token = localStorage.getItem('zt'), me = null, timer = null, map = null, layers = {}, P = {}, shownRoute = null;
 
 function toast(m) { const t = $('#toast'); t.textContent = m; t.className = 'show'; clearTimeout(toast.t); toast.t = setTimeout(() => t.className = '', 3800); }
@@ -12,7 +13,7 @@ async function api(p, method = 'GET', body) {
   const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Request failed'); return j;
 }
 const form = f => Object.fromEntries(new FormData(f));
-const go = async v => { clearInterval(timer); timer = null; if (map) { map.remove(); map = null; } layers = {}; P = {}; shownRoute = null; main.onclick = null; main.innerHTML = ''; nav();
+const go = async v => { cancelAnimationFrame(carRaf); carFor = null; scrollTo({ top: 0 }); clearInterval(timer); timer = null; if (map) { map.remove(); map = null; } layers = {}; P = {}; shownRoute = null; main.onclick = null; main.innerHTML = ''; nav();
   try { await views[v](); } catch (e) { toast(e.message); } };
 const home = () => go(!me ? 'welcome' : { passenger: 'passenger', driver: 'driver', admin: 'admin' }[me.role]);
 function nav() {
@@ -32,7 +33,7 @@ const pin = k => L.divIcon({ className: '', html: `<div class="pin ${k}"></div>`
 function drawBooking(g) {   // route + pins for a booking with geometry
   ['from', 'to', 'route'].forEach(k => layers[k] && (map.removeLayer(layers[k]), delete layers[k]));
   layers.from = L.marker(g.from, { icon: pin('from') }).addTo(map).bindTooltip('Pickup'); layers.to = L.marker(g.to, { icon: pin('to') }).addTo(map).bindTooltip('Destination');
-  layers.route = L.polyline(g.geometry.map(([x, y]) => [y, x]), { color: '#d4af37', weight: 5 }).addTo(map); map.fitBounds(layers.route.getBounds(), { padding: [30, 30] });
+  layers.route = L.polyline(g.geometry.map(([x, y]) => [y, x]), { color: '#d4af37', weight: 5 }).addTo(map); drawAnim(layers.route); map.fitBounds(layers.route.getBounds(), { padding: [30, 30] });
 }
 function breakdown(b) {
   const r = b.rates || {};
@@ -43,16 +44,51 @@ function breakdown(b) {
   <tr><td>Platform commission (${r.commissionPct}% of fare)</td><td class="r">${money(b.commissionC)}</td></tr></table>`;
 }
 const views = {};
+// ---------- motion + trust helpers
+function drawAnim(p) { const el = p.getElement && p.getElement(); if (el) { el.setAttribute('pathLength', '1'); el.classList.add('draw'); } }
+function count(el) { const to = +el.dataset.count, s = el.dataset.suffix || '', t0 = performance.now(); (function f(t) { const k = Math.min((t - t0) / 1300, 1); el.textContent = Math.round(to * (1 - Math.pow(1 - k, 3))) + s; if (k < 1) requestAnimationFrame(f); })(t0); }
+function reveal() { const io = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); $$('[data-count]', e.target).forEach(count); } }), { threshold: .15 }); $$('.reveal').forEach(el => io.observe(el)); }
+function startCar(geo, id) {   // simulated vehicle marker travelling the route (demo only, no live GPS)
+  if (!map || carFor === id || !geo || geo.length < 2) return; carFor = id; cancelAnimationFrame(carRaf);
+  const m = L.marker([geo[0][1], geo[0][0]], { icon: L.divIcon({ className: '', html: '<div class="car"></div>', iconSize: [18, 18], iconAnchor: [9, 9] }), interactive: false }).addTo(map), t0 = performance.now(), dur = 45000;
+  (function f(t) { const k = Math.min((t - t0) / dur, 1), i = Math.min(Math.floor(k * (geo.length - 1)), geo.length - 1); m.setLatLng([geo[i][1], geo[i][0]]); if (k < 1) carRaf = requestAnimationFrame(f); })(t0);
+}
+const savedPlaces = () => { try { return JSON.parse(localStorage.getItem('zp') || '[]'); } catch { return []; } };
+function savedUI() {
+  const box = $('#saved'); if (!box) return;
+  box.innerHTML = savedPlaces().map((p, i) => `<button class="btn sm ghost" data-p="${i}">★ ${esc(p.name)}</button>`).join('') + `<button class="btn sm" id="savePt">+ Save last pin</button>`;
+  $$('[data-p]', box).forEach(b => b.onclick = () => { const p = savedPlaces()[b.dataset.p]; setPt(!P.from ? 'from' : 'to', L.latLng(p.lat, p.lng), p.name); map.setView([p.lat, p.lng], 12); });
+  $('#savePt').onclick = () => { const k = P.last; if (!k || !P[k]) return toast('Drop a pin first, then save it'); const name = (prompt('Name this place', 'Home') || '').trim().slice(0, 20); if (!name) return;
+    localStorage.setItem('zp', JSON.stringify([...savedPlaces().slice(-5), { name, lat: P[k].lat, lng: P[k].lng }])); savedUI(); toast('Saved'); };
+}
+views.share = async code => {   // public read-only live trip page
+  main.innerHTML = `<div class="split"><aside class="card" id="panel"><h2>Live trip</h2><p class="hint">Loading…</p></aside><div id="map"></div></div>`; initMap(); let drawn = false;
+  const t = async () => { try { const s = await (await fetch('/api/share/' + code)).json(); if (s.error) throw 0;
+    $('#panel').innerHTML = `<h2>${LABEL[s.status] || s.status}</h2><p class="hint">${esc(s.fromName)} → ${esc(s.toName)}</p>${s.driver ? `<div class="req"><b>${esc(s.driver.name)}</b><br>${esc(s.driver.vehicle.make)} ${esc(s.driver.vehicle.model)} · ${esc(s.driver.vehicle.reg)}</div>` : ''}<p class="sim">Shared by a ZIMOVA rider</p>`;
+    if (!drawn && s.geometry) { drawn = true; drawBooking(s); if (s.status === 'in_progress') startCar(s.geometry, code); }
+  } catch { clearInterval(timer); $('#panel').innerHTML = '<h2>Link unavailable</h2><p class="hint">This trip link is invalid.</p>'; } };
+  await t(); timer = setInterval(t, 5000);
+};
 
 views.welcome = async () => {
-  main.innerHTML = `<section class="hero"><h1>ZIMOVA</h1><p class="tag">MOVE YOUR WAY</p><p>Ride-hailing across Zimbabwe — real roads, real distances, clear fares.</p></section>
-  <div class="grid2"><form class="card" id="login"><h2>Sign in</h2><label>Email</label><input name="email" type="email" required><label>Password</label><input name="password" type="password" required><button class="btn">Sign in</button>
+  const f = [['🛡️', 'Ride PIN check', 'Every trip has a 4-digit PIN. Your driver can only start once you share it.'], ['📍', 'Share your trip', 'Send a private live link so family can follow your journey.'], ['🆘', 'In-trip SOS', 'One tap alerts ZIMOVA support with your trip details.'], ['✅', 'Verified drivers', 'Drivers are reviewed and approved by an admin before they can accept rides.'], ['💵', 'Upfront fares', 'Real road distance, a clear breakdown, no surprises at the end.'], ['⭐', 'Driver ratings', 'Rate every trip so quality stays high.']];
+  const faq = [['How is my fare calculated?', 'From the real road distance: a base fare plus a per-km rate, multiplied by the vehicle class. You see the full breakdown before you book.'], ['What is the ride PIN?', 'A 4-digit code shown only to you. Give it to your driver when they arrive so only the right person starts your trip.'], ['Is this using real payments?', 'No. This is a demo: EcoCash, Visa and Mastercard are simulated and no money moves.'], ['How do I become a driver?', 'Apply with your details and vehicle information. An admin reviews your application before you can go online.']];
+  main.innerHTML = `<section class="hero center"><div class="glow"></div><p class="tag">MOVE YOUR WAY</p><h1>ZIMOVA</h1><p class="lead">Ride-hailing across Zimbabwe — real roads, real distances, clear fares you see before you go.</p><div class="cta"><button class="btn" id="goIn">Sign in</button><button class="btn ghost" id="goReg">Create account</button></div></section>
+  <div class="grid2" id="auth"><form class="card" id="login"><h2>Sign in</h2><label>Email</label><input name="email" type="email" required autocomplete="email"><label>Password</label><input name="password" type="password" required autocomplete="current-password"><button class="btn">Sign in</button>
   <p class="hint">Demo logins: driver@zimova.test / driver123 · admin@zimova.test / admin123</p></form>
   <form class="card" id="reg"><h2>New passenger</h2><label>Full name</label><input name="name" required><label>Phone</label><input name="phone" required><label>Email</label><input name="email" type="email" required><label>Password (8+ characters)</label><input name="password" type="password" minlength="8" required><button class="btn">Create account</button></form></div>
-  <p class="center"><button class="btn ghost" id="drv">Drive with ZIMOVA — apply as a driver</button></p>`;
+  <p class="center"><button class="btn ghost" id="drv">Drive with ZIMOVA — apply as a driver</button></p>
+  <section class="sec reveal"><p class="eyebrow">Safety first</p><h3 class="t">Built so you can trust every ride</h3><div class="feat">${f.map(x => `<div class="card"><span class="ico">${x[0]}</span><b>${x[1]}</b><p>${x[2]}</p></div>`).join('')}</div></section>
+  <section class="sec reveal"><p class="eyebrow">How it works</p><h3 class="t">Three steps to your ride</h3><div class="steps"><div class="card"><b>Set your route</b><p class="hint">Drop two pins or search a town anywhere in Zimbabwe.</p></div><div class="card"><b>Choose your ride</b><p class="hint">Economy, Comfort or SUV, with the full fare shown first.</p></div><div class="card"><b>Ride and rate</b><p class="hint">Share the PIN, enjoy the trip, then rate your driver.</p></div></div></section>
+  <section class="sec reveal"><div class="nums"><div><b data-count="95" data-suffix="%">0</b><span>of every fare goes to the driver</span></div><div><b data-count="3">0</b><span>vehicle classes</span></div><div><b data-count="4" data-suffix="-digit">0</b><span>PIN on every trip</span></div><div><b data-count="100" data-suffix="%">0</b><span>of fares shown upfront</span></div></div></section>
+  <section class="sec reveal"><p class="eyebrow">Questions</p><h3 class="t">Good to know</h3>${faq.map(q => `<details><summary>${q[0]}</summary><p>${q[1]}</p></details>`).join('')}</section>
+  <footer class="foot">© ZIMOVA — Move Your Way · Demo build: payments, documents and tracking are simulated.</footer>`;
   $('#login').onsubmit = async e => { e.preventDefault(); try { authed(await api('/auth/login', 'POST', form(e.target))); } catch (x) { toast(x.message); } };
   $('#reg').onsubmit = async e => { e.preventDefault(); try { authed(await api('/auth/register', 'POST', form(e.target))); } catch (x) { toast(x.message); } };
   $('#drv').onclick = () => go('driverReg');
+  $('#goIn').onclick = () => { $('#auth').scrollIntoView({ behavior: 'smooth', block: 'center' }); $('#login input').focus({ preventScroll: true }); };
+  $('#goReg').onclick = () => { $('#auth').scrollIntoView({ behavior: 'smooth', block: 'center' }); $('#reg input').focus({ preventScroll: true }); };
+  reveal();
 };
 
 views.driverReg = async () => {
@@ -91,7 +127,7 @@ function renderPlan() {
   <label>Destination</label><div class="row"><input id="toIn" placeholder="e.g. Bulawayo"><button class="btn sm" data-s="to">Search</button></div>
   <div id="quoteBox" class="hint">Set both pins to see the road distance and fare.</div>
   <label>Payment method (simulated)</label><select id="payM"><option value="ecocash">EcoCash</option><option value="visa">Visa</option><option value="mastercard">Mastercard</option></select>
-  <button class="btn" id="book" disabled>Book ride</button>`;
+  <div id="saved" class="chips"></div><button class="btn" id="book" disabled>Book ride</button>`; savedUI();
   $$('[data-s]').forEach(b => b.onclick = async () => {
     const q = $('#' + b.dataset.s + 'In').value.trim(); if (!q) return;
     try { const r = await (await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=zw&q=' + encodeURIComponent(q))).json();
@@ -102,7 +138,7 @@ function renderPlan() {
     catch (x) { toast(x.message); $('#book').disabled = false; } };
 }
 function setPt(k, ll, label) {
-  P[k] = { lat: ll.lat, lng: ll.lng };
+  P[k] = { lat: ll.lat, lng: ll.lng }; P.last = k;
   if (layers[k]) layers[k].setLatLng(ll); else { layers[k] = L.marker(ll, { draggable: true, icon: pin(k) }).addTo(map).bindTooltip(k === 'from' ? 'Pickup' : 'Destination'); layers[k].on('dragend', e => setPt(k, e.target.getLatLng())); }
   const inp = $('#' + k + 'In'); inp.value = label || `${ll.lat.toFixed(4)}, ${ll.lng.toFixed(4)}`;
   if (!label) fetch(`https://nominatim.openstreetmap.org/reverse?format=json&zoom=16&lat=${ll.lat}&lon=${ll.lng}`).then(r => r.json()).then(j => { if (j.display_name && P[k] && P[k].lat === ll.lat) inp.value = j.display_name.split(',').slice(0, 3).join(','); }).catch(() => {});
@@ -111,7 +147,7 @@ function setPt(k, ll, label) {
 async function quote() {
   if (!P.from || !P.to) return; const id = P.qid = (P.qid || 0) + 1, box = $('#quoteBox'); $('#book').disabled = true; box.textContent = 'Finding the road route…';
   try { const q = await api('/quote', 'POST', { from: P.from, to: P.to }); if (id !== P.qid) return; P.quote = q;
-    if (layers.route) map.removeLayer(layers.route); layers.route = L.polyline(q.geometry.map(([x, y]) => [y, x]), { color: '#d4af37', weight: 5 }).addTo(map); map.fitBounds(layers.route.getBounds(), { padding: [30, 30] });
+    if (layers.route) map.removeLayer(layers.route); layers.route = L.polyline(q.geometry.map(([x, y]) => [y, x]), { color: '#d4af37', weight: 5 }).addTo(map); drawAnim(layers.route); map.fitBounds(layers.route.getBounds(), { padding: [30, 30] });
     box.innerHTML = `<p><b>${q.km} km</b> by road · about ${q.min} min <span class="sim">estimate</span></p><div id="vehs">` + Object.entries(q.fares).map(([v, f]) => `<div class="veh ${v === P.veh ? 'sel' : ''}" data-v="${v}"><span>${v[0].toUpperCase() + v.slice(1)}</span><b>${money(f.totalC)}</b></div>`).join('') + `</div><div id="fb"></div>`;
     const show = () => { $$('.veh').forEach(e => e.classList.toggle('sel', e.dataset.v === P.veh)); $('#fb').innerHTML = breakdown(q.fares[P.veh]); }; show();
     $$('.veh').forEach(e => e.onclick = () => { P.veh = e.dataset.v; show(); }); $('#book').disabled = false;
@@ -119,14 +155,17 @@ async function quote() {
 }
 async function renderActive(b) {
   const d = b.driver;
-  $('#panel').innerHTML = `<h2>${LABEL[b.status]}</h2><p><span class="badge">${b.status}</span> <span class="sim">simulated payment</span></p>
+  $('#panel').innerHTML = `<h2>${LABEL[b.status]}</h2>${b.status === 'searching' ? '<div class="radar"><i></i><i></i><i></i><b></b></div>' : ''}<p><span class="badge">${b.status}</span> <span class="sim">simulated payment</span></p>
   <p class="hint">${esc(b.fromName)} → ${esc(b.toName)}<br>${b.km} km · ~${b.etaMin} min</p>
-  ${d ? `<div class="req"><b>${esc(d.name)}</b> · ${esc(d.phone)}<br>${esc(d.vehicle.make)} ${esc(d.vehicle.model)} · ${esc(d.vehicle.reg)}</div>` : '<p class="hint">Waiting for an approved, online driver to accept. (Open a driver account in another browser window to test.)</p>'}
-  ${breakdown(b)}<br><button class="btn red" id="cx">Cancel ride</button>`;
+  ${d ? `<div class="req"><b>${esc(d.name)}</b>${d.rating ? ` · ★ ${d.rating.avg}` : ''} · ${esc(d.phone)}<br>${esc(d.vehicle.make)} ${esc(d.vehicle.model)} · ${esc(d.vehicle.reg)}</div>` : '<p class="hint">Waiting for an approved, online driver to accept. (Open a driver account in another browser window to test.)</p>'}
+  ${b.pin && ['accepted', 'arrived'].includes(b.status) ? `<div class="pinbox"><span class="hint">Your ride PIN — tell it to your driver</span><b>${esc(b.pin)}</b></div>` : ''}${breakdown(b)}<br><div class="actions">${d ? '<button class="btn sm ghost" id="shr">Share trip</button><button class="btn sm red" id="sos">SOS</button>' : ''}<button class="btn red" id="cx">Cancel ride</button></div>`;
+  if ($('#shr')) { $('#shr').onclick = async () => { try { const { code } = await api(`/bookings/${b.id}/share`, 'POST'), url = location.origin + '/?share=' + code; try { await navigator.clipboard.writeText(url); toast('Live trip link copied'); } catch { prompt('Copy this link', url); } } catch (x) { toast(x.message); } };
+    $('#sos').onclick = async () => { if (!confirm('Send an SOS alert to ZIMOVA support with your trip details?')) return; try { await api(`/bookings/${b.id}/sos`, 'POST'); toast('Alert sent to ZIMOVA support. If you are in immediate danger, contact local emergency services.'); } catch (x) { toast(x.message); } }; }
   $('#cx').onclick = async () => { try { const f = await api(`/bookings/${b.id}/cancel-fee`);
     if (!confirm(f.feeC ? `Cancelling now carries a fee of ${money(f.feeC)} (free within ${f.graceSeconds}s of driver acceptance). Cancel anyway?` : 'Cancel this ride? No fee applies.')) return;
     const r = prompt('Reason (optional)') || ''; await api(`/bookings/${b.id}/cancel`, 'POST', { reason: r }); toast(f.feeC ? 'Cancelled. Fee of ' + money(f.feeC) + ' recorded (simulated, not charged)' : 'Cancelled'); P.key = null; tickP(); } catch (x) { toast(x.message); } };
-  if (shownRoute !== b.id) { shownRoute = b.id; const g = await api('/bookings/' + b.id); if (map) drawBooking(g); }
+  if (shownRoute !== b.id) { shownRoute = b.id; const g = await api('/bookings/' + b.id); if (map) drawBooking(g); P.geo = g.geometry; }
+  if (map && P.geo && b.status === 'in_progress') startCar(P.geo, b.id);
 }
 function renderPay(b) {
   $('#panel').innerHTML = `<h2>Payment summary</h2><p class="hint">Trip complete — ${b.km} km</p>${breakdown(b)}<span class="sim">SIMULATED — no real money moves</span>
@@ -138,7 +177,12 @@ function renderPay(b) {
     if (r.payment.status === 'paid') { P.receipt = r; } else toast('Payment failed (simulated)'); P.key = null; tickP(); } catch (x) { toast(x.message); } };
 }
 function renderReceipt(b) {
-  $('#panel').innerHTML = `<h2>Receipt</h2><p><span class="badge ok">PAID (SIMULATED)</span></p><p class="hint">Ref ${esc(b.payment.ref)} · ${esc(b.payment.method)} · ${new Date(b.payment.at).toLocaleString()}</p>${breakdown(b)}<br><button class="btn" id="nr">Book another ride</button>`;
+  $('#panel').innerHTML = `<h2>Receipt</h2><p><span class="badge ok">PAID (SIMULATED)</span></p><p class="hint">Ref ${esc(b.payment.ref)} · ${esc(b.payment.method)} · ${new Date(b.payment.at).toLocaleString()}</p>${breakdown(b)}
+  ${b.rating ? `<p>You rated this trip ${'★'.repeat(b.rating.stars)}</p>` : `<label>Rate your driver</label><div class="stars" id="stars">${[1, 2, 3, 4, 5].map(i => `<button data-star="${i}">★</button>`).join('')}</div>`}
+  <div class="actions"><button class="btn" id="nr">Book another ride</button><button class="btn ghost" id="pr">Print receipt</button></div>`;
+  $$('[data-star]').forEach(s => { s.onmouseenter = () => $$('[data-star]').forEach(x => x.classList.toggle('on', +x.dataset.star <= +s.dataset.star));
+    s.onclick = async () => { try { P.receipt = await api(`/bookings/${b.id}/rate`, 'POST', { stars: +s.dataset.star }); toast('Thanks for rating your driver'); renderReceipt(P.receipt); } catch (x) { toast(x.message); } }; });
+  $('#pr').onclick = () => print();
   $('#nr').onclick = () => { P.receipt = null; P.key = null; tickP(); };
 }
 views.history = async () => {
@@ -152,14 +196,14 @@ views.driver = async () => {
   main.innerHTML = `<div class="grid2"><section class="card" id="dStat"></section><section class="card"><h2>Active trip</h2><div id="dTrip"></div><div id="map" class="mini"></div></section><section class="card" id="dReq"></section><section class="card" id="dEarn"></section></div>`; initMap();
   const hidden = new Set();
   main.onclick = async e => { const b = e.target.closest('[data-act]'); if (!b) return; const { act, id } = b.dataset;
-    try { if (act === 'reject') hidden.add(id); else if (act === 'dcancel') await api(`/bookings/${id}/cancel`, 'POST', { reason: prompt('Reason') || '' }); else await api(`/bookings/${id}/${act}`, 'POST'); await tickD(hidden); } catch (x) { toast(x.message); } };
+    try { if (act === 'reject') hidden.add(id); else if (act === 'dcancel') await api(`/bookings/${id}/cancel`, 'POST', { reason: prompt('Reason') || '' }); else if (act === 'start') await api(`/bookings/${id}/start`, 'POST', { pin: prompt("Enter the passenger's 4-digit ride PIN") || '' }); else await api(`/bookings/${id}/${act}`, 'POST'); await tickD(hidden); } catch (x) { toast(x.message); } };
   await tickD(hidden); timer = setInterval(() => tickD(hidden), 3000);
 };
 async function tickD(hidden) {
   me = (await api('/me')).user; const l = await api('/bookings'), er = await api('/driver/earnings');
   const act = l.find(b => b.driverId && ['accepted', 'arrived', 'in_progress'].includes(b.status)), v = me.driver.vehicle;
   $('#dStat').innerHTML = `<h2>Driver dashboard</h2><p>${esc(me.name)} <span class="badge ${me.status === 'approved' ? 'ok' : me.status === 'pending' ? '' : 'bad'}">${me.status.replace('pending', 'pending verification')}</span></p>
-  <p class="hint">${esc(v.make)} ${esc(v.model)} · ${esc(v.reg)} · ${v.capacity} seats</p>
+  <p class="hint">${esc(v.make)} ${esc(v.model)} · ${esc(v.reg)} · ${v.capacity} seats${er.rating ? ` · ★ ${er.rating.avg} (${er.rating.count})` : ''}</p>
   <button class="btn ${me.online ? 'green' : ''}" id="on" ${me.status !== 'approved' ? 'disabled' : ''}>${me.online ? 'ONLINE — tap to go offline' : 'OFFLINE — tap to go online'}</button>
   ${me.status !== 'approved' ? '<p class="hint">Only approved drivers can go online and accept rides. An admin must approve your documents.</p>' : ''}`;
   $('#on').onclick = async () => { try { await api('/driver/online', 'POST', { online: !me.online }); tickD(hidden); } catch (x) { toast(x.message); } };
@@ -179,7 +223,7 @@ async function tickD(hidden) {
 
 // ---------- admin
 views.admin = async () => {
-  const tabs = ['Drivers', 'Bookings', 'Pricing', 'Transactions', 'Revenue', 'Audit'];
+  const tabs = ['Drivers', 'Bookings', 'Pricing', 'Transactions', 'Revenue', 'Safety', 'Audit'];
   main.innerHTML = `<div class="tabs">${tabs.map(t => `<button class="btn sm" data-t="${t}">${t}</button>`).join('')}</div><div class="card" id="ab"></div>`;
   const show = async t => { $$('[data-t]').forEach(b => b.classList.toggle('on', b.dataset.t === t)); try { await adminTabs[t]($('#ab')); } catch (x) { toast(x.message); } };
   $$('[data-t]').forEach(b => b.onclick = () => show(b.dataset.t)); main.onclick = async e => {
@@ -207,7 +251,9 @@ const adminTabs = {
   async Revenue(el) { const s = await api('/admin/summary'), k = (l, v) => `<div><span class="hint">${l}</span><b>${v}</b></div>`;
     el.innerHTML = `<h2>Revenue <span class="sim">simulated, paid trips only</span></h2><div class="stat">${k('Paid trips', s.paidTrips)}${k('Gross fares', money(s.grossFareC))}${k('Commission (5%)', money(s.commissionC))}${k('Service fees', money(s.feeC))}${k('Platform revenue', money(s.platformRevenueC))}${k('Driver earnings', money(s.driverC))}${k('Passengers paid', money(s.passengerPaidC))}${k('Drivers pending', s.pendingDrivers)}</div>
       <p class="hint">Bookings by status: ${Object.entries(s.byStatus).map(([a, b]) => a + ' ' + b).join(' · ') || 'none'}. Platform revenue is before payment-processing costs, tax and expenses.</p>`; },
+  async Safety(el) { const l = await api('/admin/alerts');
+    el.innerHTML = `<h2>Safety alerts</h2><div class="wrap"><table><tr><th>Time</th><th>From</th><th>Phone</th><th>Trip</th><th>Status</th></tr>` + (l.map(a => `<tr><td>${new Date(a.at).toLocaleString()}</td><td>${esc(a.by)} (${a.role})</td><td>${esc(a.phone)}</td><td>${a.bookingId} · ${esc(a.route)}</td><td>${a.status}</td></tr>`).join('') || '<tr><td colspan="5">No SOS alerts.</td></tr>') + `</table></div>`; },
   async Audit(el) { const l = await api('/admin/audit');
     el.innerHTML = `<h2>Audit log</h2><div class="wrap"><table>` + (l.map(a => `<tr><td>${new Date(a.at).toLocaleString()}</td><td>${esc(a.by)}</td><td>${a.action}</td><td>${esc(a.detail).slice(0, 160)}</td></tr>`).join('') || '<tr><td>No admin actions yet.</td></tr>') + `</table></div>`; }
 };
-(async () => { if (token) { try { me = (await api('/me')).user; } catch { token = null; localStorage.removeItem('zt'); } } home(); })();
+(async () => { const sc = new URLSearchParams(location.search).get('share'); if (sc) { views.share(sc); return; } if (token) { try { me = (await api('/me')).user; } catch { token = null; localStorage.removeItem('zt'); } } home(); })();
