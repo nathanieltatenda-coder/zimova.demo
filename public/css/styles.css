@@ -73,3 +73,20 @@ label.chk{display:flex;gap:8px;align-items:flex-start;color:var(--text);font-siz
 #extra{animation:fadeUp .35s var(--ease)}
 
 #map{position:relative}.maptype{position:absolute;top:10px;left:10px;z-index:5}
+.offer-panel{margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(135deg,#17150d,#101010)}.offer-panel input{font-size:20px;font-weight:750;max-width:220px}.offer-chips{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}.offer-chips .btn{border-color:#625020;color:var(--gold)}.offer-panel .hint{margin-bottom:0}
+/* Explicit passenger control for choosing pickup vs destination */
+.point-select{margin:12px 0 16px}
+.point-select button{min-height:42px;line-height:1.25}
+
+/* Passenger booking layout: map-first mobile experience with a bottom booking sheet */
+.passenger-layout #panel{min-width:0}
+@media(max-width:800px){
+  .passenger-layout{display:flex;flex-direction:column;gap:0;min-height:calc(100dvh - 90px)}
+  .passenger-layout #map{order:0;height:48dvh;min-height:300px;border-radius:0 0 18px 18px;border-left:0;border-right:0;flex:0 0 auto}
+  .passenger-layout #panel{order:1;position:relative;z-index:10;margin:-18px 8px 14px;padding:18px 15px 22px;border-radius:20px 20px 14px 14px;box-shadow:0 -12px 35px rgba(0,0,0,.28);max-height:none;overflow:visible}
+  .passenger-layout #panel:before{content:"";display:block;width:42px;height:4px;border-radius:99px;background:#555;margin:-7px auto 14px}
+  .passenger-layout #panel h2{font-size:20px}
+  .passenger-layout .point-select button{font-size:12px;padding:10px 5px}
+  .passenger-layout #book{position:sticky;bottom:10px;z-index:12;width:100%;box-shadow:0 8px 24px rgba(0,0,0,.45);min-height:48px}
+}
+@media(min-width:801px){.passenger-layout #panel{max-height:78vh;overflow-y:auto}.passenger-layout #map{height:78vh}}

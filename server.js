@@ -156,7 +156,20 @@ const LIVE = ['searching', 'accepted', 'arrived', 'in_progress'];
 const bk = id => db.bookings.find(b => b.id === id) || (() => { throw bad('Booking not found', 404); })();
 function view(b, full) {
   const { geometry, pin, dcode, ...r } = b, d = b.driverId && db.users.find(u => u.id === b.driverId), p = db.users.find(u => u.id === b.passengerId);
-  return { ...(full ? (({ pin, dcode, ...x }) => x)(b) : r), driver: d && { name: d.name, phone: d.phone, vehicle: d.driver.vehicle, rating: drvRating(d.id) }, passenger: p && { name: b.type === 'shared' ? p.name.split(' ')[0] : p.name }, driverLoc: liveLoc(b) };
+  const offers = (b.counteroffers || (b.counteroffer ? [b.counteroffer] : [])).map(co => { const cu = db.users.find(x => x.id === co.driverId); return { id: co.id || String(co.driverId), amountC: co.amountC, status: co.status, at: co.at, driver: cu ? { name: cu.name, rating: drvRating(cu.id), vehicle: cu.driver.vehicle } : null }; });
+  return { ...(full ? (({ pin, dcode, ...x }) => x)(b) : r), driver: d && { name: d.name, phone: d.phone, vehicle: d.driver.vehicle, rating: drvRating(d.id) }, passenger: p && { name: b.type === 'shared' ? p.name.split(' ')[0] : p.name }, driverLoc: liveLoc(b), counteroffer: offers.find(x => x.status === 'pending') || null, counteroffers: offers };
+}
+
+function passengerView(b, full = false) {
+  const r = view(b, full);
+  // These values are internal settlement data and must never be sent to a passenger.
+  delete r.driverC;
+  delete r.commissionC;
+  if (r.rates) {
+    r.rates = { ...r.rates };
+    delete r.rates.commissionPct;
+  }
+  return r;
 }
 // ---- booking types: private | shared | package | someone (ride for someone else)
 const PROHIBITED = /\b(gun|firearm|pistol|rifle|ammo|ammunition|explosive|bomb|grenade|dynamite|fireworks|drug|cocaine|heroin|marijuana|cannabis|dagga|mbanje|poison|acid|petrol|diesel|fuel|weapon|knife)s?\b/i;
@@ -190,27 +203,61 @@ app.post('/api/bookings', auth('passenger'), wrap(async (req, res) => {
   if (db.bookings.some(x => x.passengerId === req.user.id && LIVE.includes(x.status))) throw bad('You already have an active booking', 409);
   const type = ['private', 'shared', 'package', 'someone'].includes(b.type) ? b.type : 'private', extra = validateExtra(type, b);
   const r = await route(a, z), f = fare(r.km, type === 'someone' ? 'private' : type);        // fare recomputed on the server, browser values ignored
-  const bo = { id: 'b' + (++db.seq), passengerId: req.user.id, from: a, to: z, fromName: String(b.fromName || '').slice(0, 120), toName: String(b.toName || '').slice(0, 120),
+  // Passenger may propose a fair price. Drivers see this offer before accepting; server validates it.
+  const offerC = b.offerC == null ? f.totalC : Math.round(+b.offerC);
+  if (!Number.isFinite(offerC) || offerC < Math.round(f.totalC * 0.5) || offerC > Math.round(f.totalC * 2)) throw bad('Your offer must be between 50% and 200% of the suggested fare.');
+  f.fareC = Math.max(0, offerC - f.feeC); f.totalC = offerC; f.commissionC = Math.round(f.fareC * db.config.commissionPct / 100); f.driverC = f.fareC - f.commissionC;
+  const bo = { id: 'b' + (++db.seq), offerC, suggestedFareC: fare(r.km, type === 'someone' ? 'private' : type).totalC, passengerId: req.user.id, from: a, to: z, fromName: String(b.fromName || '').slice(0, 120), toName: String(b.toName || '').slice(0, 120),
     status: 'searching', type, ...extra, townId: tn.id, pin: String(crypto.randomInt(1000, 10000)), etaMin: r.min, geometry: r.geometry, ...f, payment: { status: 'unpaid', method: b.pay, simulated: true }, createdAt: Date.now() };
   if (type === 'shared') { const m = matchGroup(a, z, tn.id); bo.groupId = m ? m.gid : bo.id; if (m && m.driverId) { bo.driverId = m.driverId; bo.acceptedAt = Date.now(); bo.status = 'accepted'; } }
-  db.bookings.push(bo); save(); res.json({ ...view(bo), pin: bo.pin, dcode: bo.dcode });
+  db.bookings.push(bo); save(); res.json({ ...passengerView(bo), pin: bo.pin, dcode: bo.dcode });
 }));
 app.get('/api/bookings', auth(), (req, res) => {
   const u = req.user; let l = db.bookings;
   if (u.role === 'passenger') l = l.filter(b => b.passengerId === u.id);
   else if (u.role === 'driver') l = l.filter(b => b.driverId === u.id || (b.status === 'searching' && u.status === 'approved' && b.townId === u.townId));
-  res.json(l.slice().sort((a, b) => b.createdAt - a.createdAt).map(b => u.role === 'passenger' ? { ...view(b), pin: b.pin, dcode: b.dcode } : view(b)));
+  res.json(l.slice().sort((a, b) => b.createdAt - a.createdAt).map(b => u.role === 'passenger' ? { ...passengerView(b), pin: b.pin, dcode: b.dcode } : view(b)));
 });
 app.get('/api/bookings/:id', auth(), wrap((req, res) => {
   const b = bk(req.params.id), u = req.user;
   const ok = u.role === 'admin' || b.passengerId === u.id || b.driverId === u.id || (u.role === 'driver' && u.status === 'approved' && b.status === 'searching' && b.townId === u.townId);
-  if (!ok) throw bad('Not allowed', 403); res.json(u.role === 'passenger' ? { ...view(b, true), pin: b.pin, dcode: b.dcode } : view(b, true));
+  if (!ok) throw bad('Not allowed', 403); res.json(u.role === 'passenger' ? { ...passengerView(b, true), pin: b.pin, dcode: b.dcode } : view(b, true));
 }));
 const T = { accept: ['searching', 'accepted'], arrive: ['accepted', 'arrived'], start: ['arrived', 'in_progress'], complete: ['in_progress', 'completed'] };
+// Multiple drivers may independently submit one counteroffer each. Passenger chooses one.
+app.post('/api/bookings/:id/counteroffer', auth('driver'), wrap((req, res) => {
+  const b = bk(req.params.id), u = req.user, amountC = Math.round(Number(req.body.amountC));
+  if (b.status !== 'searching' || b.driverId) throw bad('This request is no longer available', 409);
+  if (u.status !== 'approved' || !u.online || u.townId !== b.townId) throw bad('You must be an approved, online driver in the pickup town', 403);
+  if (db.bookings.some(x => x.driverId === u.id && ['accepted', 'arrived', 'in_progress'].includes(x.status))) throw bad('Finish your current trip first', 409);
+  if (!Number.isFinite(amountC) || amountC < Math.round(b.suggestedFareC * 0.5) || amountC > Math.round(b.suggestedFareC * 2)) throw bad('Counteroffer must be between 50% and 200% of the suggested fare');
+  b.counteroffers = b.counteroffers || (b.counteroffer ? [b.counteroffer] : []);
+  const prior = b.counteroffers.find(x => x.driverId === u.id);
+  if (prior) { prior.amountC = amountC; prior.at = Date.now(); prior.status = 'pending'; }
+  else b.counteroffers.push({ id: 'co' + (++db.seq), driverId: u.id, amountC, at: Date.now(), status: 'pending' });
+  delete b.counteroffer; save(); res.json({ ok: true, offers: b.counteroffers.length });
+}));
+app.post('/api/bookings/:id/counteroffer/respond', auth('passenger'), wrap((req, res) => {
+  const b = bk(req.params.id), choice = req.body.choice, offerId = String(req.body.offerId || '');
+  if (b.passengerId !== req.user.id) throw bad('Not allowed', 403);
+  b.counteroffers = b.counteroffers || (b.counteroffer ? [b.counteroffer] : []);
+  const co = b.counteroffers.find(x => (x.id || String(x.driverId)) === offerId && x.status === 'pending');
+  if (b.status !== 'searching' || !co) throw bad('That driver offer is no longer available', 409);
+  if (choice === 'accept') {
+    const driver = db.users.find(u => u.id === co.driverId);
+    if (!driver || driver.status !== 'approved' || !driver.online || driver.townId !== b.townId) throw bad('That driver is no longer available', 409);
+    const totalC = co.amountC, feeC = Math.round((b.feeC || 0));
+    b.totalC = totalC; b.fareC = Math.max(0, totalC - feeC); b.commissionC = Math.round(b.fareC * db.config.commissionPct / 100); b.driverC = b.fareC - b.commissionC;
+    b.offerC = totalC; b.driverId = driver.id; b.acceptedAt = Date.now(); b.status = 'accepted'; co.status = 'accepted';
+    b.counteroffers.forEach(x => { if (x !== co && x.status === 'pending') x.status = 'closed'; });
+  } else if (choice === 'decline') { co.status = 'declined'; co.respondedAt = Date.now(); } else throw bad('Choose accept or decline');
+  save(); res.json({ ...passengerView(b), pin: b.pin, dcode: b.dcode });
+}));
 app.post('/api/bookings/:id/:action(accept|arrive|start|complete)', auth('driver'), wrap((req, res) => {
   const a = req.params.action, b = bk(req.params.id), [from, to] = T[a], u = req.user;
   if (b.status !== from) throw bad(`Booking is "${b.status}"; cannot ${a}`, 409);   // blocks invalid / duplicate transitions
   if (a === 'accept') {
+    if ((b.counteroffers || (b.counteroffer ? [b.counteroffer] : [])).some(co => co.status === 'pending')) throw bad('The passenger is comparing driver offers; wait for their decision', 409);
     if (u.status !== 'approved') throw bad('Only approved drivers can accept rides', 403);
     if (!u.online) throw bad('Go online first', 409);
     if (b.townId !== u.townId) throw bad('This pickup is outside your approved town', 403);
@@ -241,17 +288,17 @@ app.post('/api/bookings/:id/cancel', auth('passenger', 'driver'), wrap((req, res
     (b.cancelLog = b.cancelLog || []).push({ by: 'driver', at: Date.now(), reason, feeC: 0 });
     b.status = 'searching'; b.driverId = null; b.acceptedAt = null;
   }
-  save(); res.json(view(b));
+  save(); res.json(u.role === 'passenger' ? passengerView(b) : view(b));
 }));
 app.post('/api/bookings/:id/pay', auth('passenger'), wrap((req, res) => {
   const b = bk(req.params.id); if (b.passengerId !== req.user.id) throw bad('Not allowed', 403);
   if (b.status !== 'completed') throw bad('Trip is not completed', 409);
-  if (b.payment.status === 'paid') return res.json(view(b));            // idempotent: never pay twice
+  if (b.payment.status === 'paid') return res.json(passengerView(b));            // idempotent: never pay twice
   if (!['ecocash', 'visa', 'mastercard'].includes(req.body.method)) throw bad('Choose a payment method');
   const ok = req.body.outcome !== 'fail', ref = 'SIM-' + crypto.randomBytes(4).toString('hex').toUpperCase();
   b.payment = { status: ok ? 'paid' : 'failed', method: req.body.method, ref, at: Date.now(), amountC: b.totalC, simulated: true };
   db.txns.push({ ref, bookingId: b.id, method: req.body.method, amountC: b.totalC, status: b.payment.status, at: Date.now(), simulated: true });
-  save(); res.json(view(b));
+  save(); res.json(passengerView(b));
 }));
 
 // ---- trust & safety: rating, share-trip link, SOS
@@ -261,7 +308,7 @@ app.post('/api/bookings/:id/rate', auth('passenger'), wrap((req, res) => {
   if (b.status !== 'completed') throw bad('You can rate a driver after the trip is completed', 409);
   if (b.rating) throw bad('You already rated this trip', 409);
   if (!(n >= 1 && n <= 5)) throw bad('Choose 1 to 5 stars');
-  b.rating = { stars: n, comment: String(req.body.comment || '').slice(0, 200), at: Date.now() }; save(); res.json(view(b));
+  b.rating = { stars: n, comment: String(req.body.comment || '').slice(0, 200), at: Date.now() }; save(); res.json(passengerView(b));
 }));
 app.post('/api/bookings/:id/share', auth('passenger'), wrap((req, res) => {
   const b = bk(req.params.id); if (b.passengerId !== req.user.id) throw bad('Not allowed', 403);

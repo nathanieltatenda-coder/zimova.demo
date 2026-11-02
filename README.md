@@ -111,3 +111,30 @@ Rough usage per trip: about 2 map loads (passenger + driver), 1 to 4 route quote
 
 ### Not verified here
 I had no Google key, so the Google code path (map drawing, markers, search, satellite toggle) has not been run against real Google services. The server side (Routes request, polyline decoding, live location rules) was tested with a stand-in service. Expect to fix small issues on first run with your key.
+
+## Added demo features (November 2026)
+- Passenger fare offers: after the road quote, passengers can enter a proposed total fare or choose suggested offer buttons. The server validates offers between 50% and 200% of the calculated suggested fare and computes the driver/platform split from the accepted offer.
+- Driver request cards show the passenger's proposed fare and the driver's estimated earnings before acceptance.
+- Existing driver ride controls remain: accept/reject requests, mark arrived, start with the passenger PIN, and complete the trip.
+- Existing active-trip location sharing remains enabled only during an active driver trip; passenger tracking refreshes from the server.
+- Mapping remains Leaflet + OpenStreetMap with OSRM routing by default; no Google Maps billing is required for this demo configuration.
+
+This is a development demo. Public OSM/Nominatim/OSRM endpoints have usage policies and limits; use an appropriate hosted provider or self-hosted services before production traffic. Payments and live tracking are demo-grade, not production payment or dispatch infrastructure.
+
+## Passenger pickup and destination selection
+
+The passenger must explicitly choose both trip points before ZIMOVA requests a route or displays a fare. The current GPS position is only suggested as a pickup; it is not treated as confirmed. Use the **Choose pickup** / **Choose destination** controls (or focus the matching input), then tap the map or search for a place. The passenger can also drag either marker to adjust the point.
+
+
+## Passenger booking UX update
+- Passenger booking now uses a map-first layout on mobile with a bottom booking sheet.
+- The passenger's selected fare offer is submitted to the server as `offerC` and validated server-side against the suggested fare range.
+- Eligible drivers in the pickup town see the passenger's proposed fare in their ride requests and can accept or decline.
+- Driver matching and availability are based on approved, online drivers; the demo does not fabricate nearby driver offers.
+
+## Driver counteroffers (demo)
+Drivers viewing an available request can choose **Counteroffer** and enter an amount in USD. The server validates the amount against 50%-200% of the suggested fare. The passenger sees the driver's proposed amount and can accept or decline it. Accepting assigns that driver and updates the booking fare and driver/platform split; declining leaves the booking open for another driver. This is a demo workflow; payments remain simulated.
+
+## Multiple driver offers (updated demo)
+
+For a searching booking, each eligible approved and online driver in the pickup town can submit one counteroffer. A driver may revise their own pending offer; separate drivers' offers are retained independently. The passenger sees the pending offers together, including available driver name, vehicle and rating details, and can accept one or decline individual offers. Accepting one offer assigns that driver and closes the other pending offers. Drivers cannot accept the booking directly while pending offers are being compared. This is demo functionality backed by the app's current JSON persistence; it is not a production dispatch guarantee.
