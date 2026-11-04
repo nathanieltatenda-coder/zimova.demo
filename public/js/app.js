@@ -8,8 +8,8 @@ let carRaf = 0, carFor = null;
 let token = localStorage.getItem('zt'), me = null, timer = null, map = null, layers = {}, P = {}, shownRoute = null;
 
 function toast(m) { const t = $('#toast'); t.textContent = m; t.className = 'show'; clearTimeout(toast.t); toast.t = setTimeout(() => t.className = '', 3800); }
-async function api(p, method = 'GET', body) {
-  const r = await fetch('/api' + p, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
+async function api(p, method = 'GET', body, hdrs = {}) {
+  const r = await fetch('/api' + p, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}), ...hdrs }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Request failed'); return j;
 }
 const form = f => Object.fromEntries(new FormData(f));
@@ -35,7 +35,7 @@ function locate(auto) {   // passenger's current position, only after the browse
   if (!navigator.geolocation) return auto || toast('Location is not available in this browser');
   navigator.geolocation.getCurrentPosition(p => { const la = p.coords.latitude, ln = p.coords.longitude; if (!map) return;
     if (la < -22.6 || la > -15.5 || ln < 25 || ln > 33.3) return toast('Your location is outside Zimbabwe. Tap the map to choose a pickup.');
-    const ll = L.latLng(la, ln); map.setView(ll, 14); if (!P.from || !auto) setPt('from', ll, 'My current location (suggested)', false); },
+    const ll = L.latLng(la, ln); map.setView(ll, 14); if (!P.from || !auto) setPt('from', ll); },
     () => { if (!auto) toast('Allow location access to use your current position'); }, { enableHighAccuracy: true, timeout: 10000 });
 }
 let watchId = null, lastSend = 0;
@@ -61,12 +61,13 @@ function drawBooking(g) {   // route + pins for a booking with geometry
   layers.route = L.polyline(g.geometry.map(([x, y]) => [y, x]), { color: '#d4af37', weight: 5 }).addTo(map); drawAnim(layers.route); map.fitBounds(layers.route.getBounds(), { padding: [30, 30] });
 }
 function breakdown(b) {
-  // Passenger-facing receipt: never display internal driver earnings or platform commission.
-  return `<table><tr><td>Trip fare (${b.km} km, ${esc(b.vehicle)})</td><td class="r">${money(b.fareC)}</td></tr>
-  ${b.rates?.serviceFeePct ? `<tr><td>Passenger service fee (${b.rates.serviceFeePct}%)</td><td class="r">${money(b.feeC)}</td></tr>` : ''}
-  <tr class="tot"><td>Total paid</td><td class="r">${money(b.totalC)}</td></tr></table>`;
+  const r = b.rates || {};
+  return `<table><tr><td>Original fare (${b.km} km, ${esc(b.vehicle)})</td><td class="r">${money(b.fareC)}</td></tr>
+  ${r.serviceFeePct ? `<tr><td>Passenger service fee (${r.serviceFeePct}%)</td><td class="r">${money(b.feeC)}</td></tr>` : ''}
+  <tr class="tot"><td>Total passenger payment</td><td class="r">${money(b.totalC)}</td></tr>
+  <tr><td>Driver earnings (${100 - r.commissionPct}% of fare)</td><td class="r">${money(b.driverC)}</td></tr>
+  <tr><td>Platform commission (${r.commissionPct}% of fare)</td><td class="r">${money(b.commissionC)}</td></tr></table>`;
 }
-
 const views = {};
 const TYPE = { private: 'Private trip', shared: 'Shared trip', package: 'Package delivery', someone: 'Ride for someone else' };
 const typeLabel = b => TYPE[b.type || b.vehicle] || esc(b.vehicle);
@@ -79,7 +80,7 @@ const savedPlaces = () => { try { return JSON.parse(localStorage.getItem('zp') |
 function savedUI() {
   const box = $('#saved'); if (!box) return;
   box.innerHTML = savedPlaces().map((p, i) => `<button class="btn sm ghost" data-p="${i}">★ ${esc(p.name)}</button>`).join('') + `<button class="btn sm" id="savePt">+ Save last pin</button>`;
-  $$('[data-p]', box).forEach(b => b.onclick = () => { const p = savedPlaces()[b.dataset.p]; setPt(P.selecting || 'from', L.latLng(p.lat, p.lng), p.name, true); map.setView([p.lat, p.lng], 12); });
+  $$('[data-p]', box).forEach(b => b.onclick = () => { const p = savedPlaces()[b.dataset.p]; setPt(!P.from ? 'from' : 'to', L.latLng(p.lat, p.lng), p.name); map.setView([p.lat, p.lng], 12); });
   $('#savePt').onclick = () => { const k = P.last; if (!k || !P[k]) return toast('Drop a pin first, then save it'); const name = (prompt('Name this place', 'Home') || '').trim().slice(0, 20); if (!name) return;
     localStorage.setItem('zp', JSON.stringify([...savedPlaces().slice(-5), { name, lat: P[k].lat, lng: P[k].lng }])); savedUI(); toast('Saved'); };
 }
@@ -122,54 +123,51 @@ views.driverReg = async () => {
   <input name="licenceNumber" placeholder="Driver's licence number (fictional)" required><label>Licence expiry</label><input name="licenceExpiry" type="date" required>
   <h3>3. Vehicle</h3><div class="row"><input name="make" placeholder="Make" required><input name="model" placeholder="Model" required></div><div class="row"><input name="year" type="number" placeholder="Year" required><input name="reg" placeholder="Registration no." required><input name="capacity" type="number" placeholder="Seats" required></div>
   <h3>4. Operating town</h3><select name="townId" required>${towns.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select><p class="hint">You only receive ride requests whose pickup is inside this town. An admin must approve it.</p>
-  <h3>5. Settlement</h3><select name="settlement"><option value="ecocash">EcoCash wallet</option><option value="bank">Bank account</option><option value="card">Card (via provider-hosted setup later)</option></select>
+  <h3>5. Insurance &amp; registration</h3><input name="insuranceNumber" placeholder="Insurance policy number (fictional)" required><label>Insurance expiry</label><input name="insuranceExpiry" type="date" required><input name="regBook" placeholder="Vehicle registration book number (fictional)" required>
+  <h3>6. Settlement</h3><select name="settlement"><option value="ecocash">EcoCash wallet</option><option value="bank">Bank account</option><option value="card">Card (via provider-hosted setup later)</option></select>
   <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="docs" style="width:auto;margin:0"> I have attached sample (fictional) ID, licence, vehicle and insurance documents</label><br>
   <button class="btn">Submit for verification</button></form>`;
   $('#dr').onsubmit = async e => { e.preventDefault(); const f = form(e.target);
     try { authed(await api('/auth/driver-register', 'POST', { name: f.name, phone: f.phone, email: f.email, password: f.password,
-      driver: { idNumber: f.idNumber, idExpiry: f.idExpiry, licenceNumber: f.licenceNumber, licenceExpiry: f.licenceExpiry, settlement: f.settlement, townId: f.townId, docsConfirmed: !!f.docs,
+      driver: { idNumber: f.idNumber, idExpiry: f.idExpiry, licenceNumber: f.licenceNumber, licenceExpiry: f.licenceExpiry, settlement: f.settlement, townId: f.townId, insuranceNumber: f.insuranceNumber, insuranceExpiry: f.insuranceExpiry, regBook: f.regBook, docsConfirmed: !!f.docs,
         vehicle: { make: f.make, model: f.model, year: +f.year, reg: f.reg, capacity: +f.capacity } } })); toast('Submitted. Status: pending verification'); } catch (x) { toast(x.message); } };
 };
 
 // ---------- passenger
 views.passenger = async () => {
-  main.innerHTML = `<div class="split passenger-layout"><aside class="card" id="panel"></aside><div id="map"></div></div>`; initMap(); api('/towns').then(ts => { if (map) ts.forEach(t => L.polygon(t.polygon, { color: '#d4af37', weight: 1, dashArray: '4', fillOpacity: .07, interactive: false }).addTo(map)); }).catch(() => {});
-  map.on('click', e => { if (P.mode === 'plan') setPt(P.selecting || 'from', e.latlng, null, true); });
+  main.innerHTML = `<div class="split"><div><button class="grab" id="grab" aria-label="Expand or collapse booking panel"></button><aside class="card" id="panel"></aside></div><div id="map"></div></div>`; $('#grab').onclick = () => $('#panel').classList.toggle('collapsed'); initMap(); api('/towns').then(ts => { if (map) ts.forEach(t => L.polygon(t.polygon, { color: '#d4af37', weight: 1, dashArray: '4', fillOpacity: .07, interactive: false }).addTo(map)); }).catch(() => {});
+  map.on('click', e => { if (P.mode === 'plan') setPt(!P.from ? 'from' : 'to', e.latlng); });
   await tickP(); timer = setInterval(tickP, 3000);
 };
 async function tickP() {
-  const l = await api('/bookings'), act = l.find(b => ACTIVE.includes(b.status)), pay = l.find(b => b.status === 'completed' && b.payment.status !== 'paid');
+  const l = await api('/bookings'), act = l.find(b => ACTIVE.includes(b.status)), pay = l.find(b => b.status === 'completed' && ['pending', 'processing', 'failed'].includes(b.payment.status));
+  if (pay) P.payId = pay.id; const done = !act && !pay && P.payId && l.find(b => b.id === P.payId && b.payment.status === 'paid'); if (done) { P.receipt = done; P.payId = null; }
   const key = act ? 'a' + JSON.stringify({ ...act, driverLoc: null }) : pay ? 'p' + pay.id + pay.payment.status : P.receipt ? 'r' + P.receipt.id : 'plan';
   if (act) moveDriver(act.driverLoc); if (key === P.key) return; const was = P.key; P.key = key;
   if (act) { P.mode = 'active'; renderActive(act); } else if (pay) { P.mode = 'pay'; renderPay(pay); } else if (P.receipt) renderReceipt(P.receipt); else if (!was || was[0] !== 'p' || true) { P.mode = 'plan'; renderPlan(); }
 }
 function renderPlan() {
   ['from', 'to', 'route', 'drv'].forEach(k => layers[k] && (map.removeLayer(layers[k]), delete layers[k]));
-  Object.assign(P, { from: null, to: null, quote: null, opt: P.opt || 'private', names: {}, selecting: 'from', confirmedFrom: false, confirmedTo: false });
-  $('#panel').innerHTML = `<h2>Book with ZIMOVA</h2><div class="seg" id="seg">${Object.entries({ private: 'Private', shared: 'Shared', package: 'Package', someone: 'For someone' }).map(([k, t]) => `<button data-o="${k}" class="${k === P.opt ? 'on' : ''}">${t}</button>`).join('')}</div>
-  <p class="hint">You choose both points. Select a field below, then tap the map or search for a place. Your current location may be suggested as pickup, but it is not confirmed until you choose it.</p>
-  <div class="seg point-select" id="pointSelect"><button type="button" data-point="from" class="on">📍 Choose pickup</button><button type="button" data-point="to">🏁 Choose destination</button></div>
-  <label>Pickup</label><div class="row"><input id="fromIn" placeholder="Choose your pickup"><button class="btn sm ghost" id="loc" title="Use my current location">📍</button><button class="btn sm" data-s="from">Search</button></div>
-  <label>Destination</label><div class="row"><input id="toIn" placeholder="Where are you going?"><button class="btn sm" data-s="to">Search</button></div>
+  Object.assign(P, { from: null, to: null, quote: null, opt: P.opt || 'private', names: {} });
+  $('#panel').innerHTML = `<h2>Book with ZIMOVA</h2>${phoneBanner()}<div class="seg" id="seg">${Object.entries({ private: 'Private', shared: 'Shared', package: 'Package', someone: 'For someone' }).map(([k, t]) => `<button data-o="${k}" class="${k === P.opt ? 'on' : ''}">${t}</button>`).join('')}</div>
+  <p class="hint">Your pickup must be inside a gold service area. Tap the map to drop a <b>pickup</b> pin, then a <b>destination</b> pin. Drag pins to adjust, or search a town.</p>
+  <label>Pickup</label><div class="row"><input id="fromIn" placeholder="e.g. Harare"><button class="btn sm ghost" id="loc" title="Use my current location">📍</button><button class="btn sm" data-s="from">Search</button></div>
+  <label>Destination</label><div class="row"><input id="toIn" placeholder="e.g. Bulawayo"><button class="btn sm" data-s="to">Search</button></div>
   <div id="extra"></div><div id="quoteBox" class="hint">Set both pins to see the road distance and fare.</div>
-  <label>Payment method (simulated)</label><select id="payM"><option value="ecocash">EcoCash</option><option value="visa">Visa</option><option value="mastercard">Mastercard</option></select>
-  <div id="saved" class="chips"></div><button class="btn" id="book" disabled>Book ride</button>`; savedUI(); drawExtra();
-  const choosePoint = k => { P.selecting = k; $$('[data-point]').forEach(x => x.classList.toggle('on', x.dataset.point === k)); toast(k === 'from' ? 'Choose your pickup on the map or search.' : 'Choose your destination on the map or search.'); };
-  $$('[data-point]').forEach(b => b.onclick = () => choosePoint(b.dataset.point));
-  $('#fromIn').onfocus = () => choosePoint('from'); $('#toIn').onfocus = () => choosePoint('to');
-  $('#loc').onclick = () => { choosePoint('from'); locate(false); }; if (!P.located) { P.located = true; locate(true); }
+  <label>Payment method</label><select id="payM"><option value="ecocash">EcoCash</option><option value="visa">Visa</option><option value="mastercard">Mastercard</option></select>
+  <div id="saved" class="chips"></div><button class="btn" id="book" disabled>Book ride</button>`; savedUI(); drawExtra(); $('#loc').onclick = () => locate(false); if ($('#vp')) $('#vp').onclick = verifyPhone; if (!P.located) { P.located = true; locate(true); }
   $$('[data-o]').forEach(b => b.onclick = () => { P.opt = b.dataset.o; $$('[data-o]').forEach(x => x.classList.toggle('on', x === b)); drawExtra(); if (P.quote) showQuote(); });
   $$('[data-s]').forEach(b => b.onclick = async () => {
     const q = $('#' + b.dataset.s + 'In').value.trim(); if (!q) return;
     try { const r = await MAPS.search(q);
-      if (!r) return toast('Nothing found in Zimbabwe for "' + q + '"'); const ll = L.latLng(r.lat, r.lng); choosePoint(b.dataset.s); setPt(b.dataset.s, ll, q, true); map.setView(ll, 12);
+      if (!r) return toast('Nothing found in Zimbabwe for "' + q + '"'); const ll = L.latLng(r.lat, r.lng); setPt(b.dataset.s, ll, q); map.setView(ll, 12);
     } catch { toast('Search service unavailable. Tap the map instead.'); } });
   $('#book').onclick = async () => {
-    const v = id => ($(id) || {}).value || '', body = { from: P.from, to: P.to, fromName: v('#fromIn'), toName: v('#toIn'), type: P.opt, pay: v('#payM'), offerC: P.offerC || P.quote?.fares[fareKey()]?.totalC };
+    const v = id => ($(id) || {}).value || '', body = { from: P.from, to: P.to, fromName: v('#fromIn'), toName: v('#toIn'), type: P.opt, pay: v('#payM') };
     if (P.opt === 'someone') body.rider = { name: v('#rn'), phone: v('#rp') };
     if (P.opt === 'shared') body.consent = $('#consent').checked;
     if (P.opt === 'package') body.pkg = { senderName: v('#pk_sn'), senderPhone: v('#pk_sp'), recipientName: v('#pk_rn'), recipientPhone: v('#pk_rp'), description: v('#pk_d'), category: v('#pk_c'), size: v('#pk_z'), weightKg: +v('#pk_w'), instructions: v('#pk_i'), noProhibited: $('#pk_ok').checked };
-    try { $('#book').disabled = true; await api('/bookings', 'POST', body); P.key = null; tickP(); toast(P.opt === 'package' ? 'Delivery requested' : 'Ride requested'); }
+    try { $('#book').disabled = true; await api('/bookings', 'POST', body, { 'Idempotency-Key': crypto.randomUUID() }); P.key = null; tickP(); toast(P.opt === 'package' ? 'Delivery requested' : 'Ride requested'); }
     catch (x) { toast(x.message); $('#book').disabled = false; } };
 }
 function drawExtra() {
@@ -184,22 +182,18 @@ function drawExtra() {
 }
 function showQuote() {
   const q = P.quote, f = q.fares[fareKey()];
-  $('#quoteBox').innerHTML = `<p><b>${q.km} km</b> by road · about ${q.min} min · pickup in ${esc(q.town)} <span class="sim">suggested fare</span></p><div class="veh sel"><span>${TYPE[P.opt]}</span><b>${money(f.totalC)}</b></div>` +
-    `<div class="offer-panel"><label>Offer your fare (USD)</label><input id="offerFare" type="number" min="${(f.totalC*.5/100).toFixed(2)}" max="${(f.totalC*2/100).toFixed(2)}" step="0.01" value="${((P.offerC || f.totalC)/100).toFixed(2)}"><div class="offer-chips">${[1.2,1.4,1.6].map(k=>`<button type="button" class="btn sm ghost" data-offer="${Math.round(f.totalC*k)}">${money(Math.round(f.totalC*k))}</button>`).join('')}</div><p class="hint">Your offer is sent to eligible drivers in your pickup town. They can accept or decline it. Suggested fare: ${money(f.totalC)}.</p></div>` +
-    (P.opt === 'shared' ? `<p class="hint">Private would be ${money(q.fares.private.totalC)} for this route.</p>` : '') + breakdown(f);
-  $('#offerFare').oninput = e => { const n = Math.round(Number(e.target.value)*100); P.offerC = Number.isFinite(n) && n > 0 ? n : f.totalC; };
-  $$('[data-offer]').forEach(b=>b.onclick=()=>{P.offerC=+b.dataset.offer; $('#offerFare').value=(P.offerC/100).toFixed(2);}); $('#book').disabled = false;
+  $('#quoteBox').innerHTML = `<p><b>${q.km} km</b> by road · about ${q.min} min · pickup in ${esc(q.town)} <span class="sim">estimate</span></p><div class="veh sel"><span>${TYPE[P.opt]}</span>${numEl(f.totalC)}</div><p class="hint">${q.driversOnline ? q.driversOnline + ' driver(s) online in ' + esc(q.town) : 'No drivers online in ' + esc(q.town) + ' right now'}</p>` +
+    (P.opt === 'shared' ? `<p class="hint">Private would be ${money(q.fares.private.totalC)} for this route.</p>` : '') + breakdown(f); $('#book').disabled = false; runNums($('#quoteBox'));
 }
-function setPt(k, ll, label, explicit = true) {
-  P[k] = { lat: ll.lat, lng: ll.lng }; P.last = k; P[k === 'from' ? 'confirmedFrom' : 'confirmedTo'] = !!explicit; P.selecting = k;
-  $$('[data-point]').forEach(x => x.classList.toggle('on', x.dataset.point === k));
-  if (layers[k]) layers[k].setLatLng(ll); else { layers[k] = L.marker(ll, { draggable: true, icon: pin(k) }).addTo(map).bindTooltip(k === 'from' ? 'Pickup' : 'Destination'); layers[k].on('dragend', e => setPt(k, e.target.getLatLng(), null, true)); }
+function setPt(k, ll, label) {
+  P[k] = { lat: ll.lat, lng: ll.lng }; P.last = k;
+  if (layers[k]) layers[k].setLatLng(ll); else { layers[k] = L.marker(ll, { draggable: true, icon: pin(k) }).addTo(map).bindTooltip(k === 'from' ? 'Pickup' : 'Destination'); layers[k].on('dragend', e => setPt(k, e.target.getLatLng())); }
   const inp = $('#' + k + 'In'); inp.value = label || `${ll.lat.toFixed(4)}, ${ll.lng.toFixed(4)}`;
   if (!label) MAPS.reverse(ll).then(n => { if (n && P[k] && P[k].lat === ll.lat) inp.value = n; }).catch(() => {});
   quote();
 }
 async function quote() {
-  if (!P.from || !P.to || !P.confirmedFrom || !P.confirmedTo) { P.quote = null; $('#book').disabled = true; $('#quoteBox').textContent = 'Please confirm your pickup and destination to calculate the route and fare.'; return; } const id = P.qid = (P.qid || 0) + 1, box = $('#quoteBox'); $('#book').disabled = true; box.textContent = 'Finding the road route…';
+  if (!P.from || !P.to) return; const id = P.qid = (P.qid || 0) + 1, box = $('#quoteBox'); $('#book').disabled = true; box.textContent = 'Finding the road route…';
   try { const q = await api('/quote', 'POST', { from: P.from, to: P.to }); if (id !== P.qid) return; P.quote = q;
     if (layers.route) map.removeLayer(layers.route); layers.route = L.polyline(q.geometry.map(([x, y]) => [y, x]), { color: '#d4af37', weight: 5 }).addTo(map); drawAnim(layers.route); map.fitBounds(layers.route.getBounds(), { padding: [30, 30] });
     showQuote();
@@ -207,42 +201,40 @@ async function quote() {
 }
 async function renderActive(b) {
   const d = b.driver;
-  $('#panel').innerHTML = `<h2>${LABEL[b.status]}</h2>${b.status === 'searching' ? '<div class="radar"><i></i><i></i><i></i><b></b></div>' : ''}<p><span class="badge">${b.status}</span> <span class="sim">simulated payment</span></p>
+  $('#panel').innerHTML = `<h2>${LABEL[b.status]}</h2>${stepper(b.status)}${b.status === 'searching' ? matchingHtml() : ''}<p><span class="badge">${b.status}</span> <span class="sim">${sbx('sandbox payments')}</span></p>
   <p class="hint"><span class="badge">${typeLabel(b)}</span><br>${esc(b.fromName)} → ${esc(b.toName)}<br>${b.km} km · ~${b.etaMin} min</p>
   ${d ? `<div class="req"><b>${esc(d.name)}</b>${d.rating ? ` · ★ ${d.rating.avg}` : ''} · ${esc(d.phone)}<br>${esc(d.vehicle.make)} ${esc(d.vehicle.model)} · ${esc(d.vehicle.reg)}</div>` : '<p class="hint">Waiting for an approved, online driver to accept. (Open a driver account in another browser window to test.)</p>'}
-  ${b.status === 'searching' && (b.counteroffers || (b.counteroffer ? [b.counteroffer] : [])).some(o => o.status === 'pending') ? `<div class="req"><b>Compare driver offers</b><p class="hint">Choose the driver and fare that suit you. Accepting one closes the others.</p>${(b.counteroffers || [b.counteroffer]).filter(o => o.status === 'pending').map(o => `<div class="offer-row"><b>${esc(o.driver?.name || 'Driver')}</b> ${o.driver?.rating ? `· ★ ${o.driver.rating.avg}` : '· New driver'}<br><span class="hint">${esc(o.driver?.vehicle?.make || '')} ${esc(o.driver?.vehicle?.model || '')} · ${esc(o.driver?.vehicle?.reg || '')}</span><p><strong>${money(o.amountC)}</strong></p><button class="btn sm green" data-counter-choice="accept" data-offer-id="${esc(o.id || String(o.driverId))}">Choose this driver</button> <button class="btn sm ghost" data-counter-choice="decline" data-offer-id="${esc(o.id || String(o.driverId))}">Decline</button></div>`).join('')}</div>` : ''}
   ${d ? `<p class="hint" id="drvloc">${b.driverLoc ? '📍 Driver location: live' : "Waiting for the driver's location…"}</p>` : ''}${b.pin && ['accepted', 'arrived'].includes(b.status) ? `<div class="pinbox"><span class="hint">${b.type === 'package' ? 'Collection code — the sender gives it to the driver' : 'Your ride PIN — tell it to your driver'}</span><b>${esc(b.pin)}</b></div>` : ''}${b.dcode && b.type === 'package' && b.status !== 'searching' ? `<div class="pinbox"><span class="hint">Delivery code — give it to the recipient</span><b>${esc(b.dcode)}</b></div>` : ''}${breakdown(b)}<br><div class="actions">${d ? '<button class="btn sm ghost" id="shr">Share trip</button><button class="btn sm red" id="sos">SOS</button>' : ''}<button class="btn red" id="cx">Cancel ride</button></div>`;
   if ($('#shr')) { $('#shr').onclick = async () => { try { const { code } = await api(`/bookings/${b.id}/share`, 'POST'), url = location.origin + '/?share=' + code; try { await navigator.clipboard.writeText(url); toast('Live trip link copied'); } catch { prompt('Copy this link', url); } } catch (x) { toast(x.message); } };
-    $('#sos').onclick = async () => { if (!confirm('Send an SOS alert to ZIMOVA support with your trip details?')) return; try { await api(`/bookings/${b.id}/sos`, 'POST'); toast('Alert sent to ZIMOVA support. If you are in immediate danger, contact local emergency services.'); } catch (x) { toast(x.message); } }; }
-  $$('[data-counter-choice]').forEach(btn => btn.onclick = async () => { try { await api(`/bookings/${b.id}/counteroffer/respond`, 'POST', { choice: btn.dataset.counterChoice, offerId: btn.dataset.offerId }); toast(btn.dataset.counterChoice === 'accept' ? 'Driver selected; ride confirmed' : 'Offer declined'); P.key = null; tickP(); } catch (x) { toast(x.message); } });
+    $('#sos').onclick = async () => { if (!await confirmBox('Send an SOS alert?', 'ZIMOVA support will be alerted with your trip details and emergency contact. If you are in immediate danger, also contact local emergency services.', 'Send SOS')) return; try { await api(`/bookings/${b.id}/sos`, 'POST'); toast('Alert sent to ZIMOVA support. If you are in immediate danger, contact local emergency services.'); } catch (x) { toast(x.message); } }; }
   $('#cx').onclick = async () => { try { const f = await api(`/bookings/${b.id}/cancel-fee`);
-    if (!confirm(f.feeC ? `Cancelling now carries a fee of ${money(f.feeC)} (free within ${f.graceSeconds}s of driver acceptance). Cancel anyway?` : 'Cancel this ride? No fee applies.')) return;
-    const r = prompt('Reason (optional)') || ''; await api(`/bookings/${b.id}/cancel`, 'POST', { reason: r }); toast(f.feeC ? 'Cancelled. Fee of ' + money(f.feeC) + ' recorded (simulated, not charged)' : 'Cancelled'); P.key = null; tickP(); } catch (x) { toast(x.message); } };
+    if (!await confirmBox('Cancel this ride?', f.feeC ? `Cancelling now carries a fee of ${money(f.feeC)} (free within ${f.graceSeconds}s of driver acceptance).` : 'No fee applies.', 'Cancel ride')) return;
+    const r = (await ask('Reason (optional)', 'This helps us improve')) ?? ''; await api(`/bookings/${b.id}/cancel`, 'POST', { reason: r }); toast(f.feeC ? 'Cancelled. Fee of ' + money(f.feeC) + ' recorded (simulated, not charged)' : 'Cancelled'); P.key = null; tickP(); } catch (x) { toast(x.message); } };
   if (shownRoute !== b.id) { shownRoute = b.id; const g = await api('/bookings/' + b.id); if (map) drawBooking(g); P.geo = g.geometry; }
   moveDriver(b.driverLoc);
 }
 function renderPay(b) {
-  $('#panel').innerHTML = `<h2>Payment summary</h2><p class="hint">Trip complete — ${b.km} km</p>${breakdown(b)}<span class="sim">SIMULATED — no real money moves</span>
+  if (b.payment.status === 'processing') { $('#panel').innerHTML = `<h2>Confirming payment…</h2><div class="radar"><i></i><i></i><i></i><b></b></div><p class="hint">Waiting for the payment provider to confirm ${money(b.totalC)}. This takes a few seconds.</p>`; return; }
+  $('#panel').innerHTML = `<h2>Payment summary</h2><p class="hint">Trip complete — ${b.km} km</p>${breakdown(b)}<span class="sim">${sbx('SANDBOX — no real money moves')}</span>
   <label>Pay with</label><select id="pm"><option value="ecocash">EcoCash</option><option value="visa">Visa</option><option value="mastercard">Mastercard</option></select>
-  <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="fail" style="width:auto;margin:0"> Simulate a failed payment</label><br>
+  ${sbxOn() ? '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="fail" style="width:auto;margin:0"> Sandbox: simulate a declined payment</label><br>' : '<br>'}
   ${b.payment.status === 'failed' ? '<p style="color:var(--bad)">Last attempt failed. Try again.</p>' : ''}<button class="btn" id="pay">Pay ${money(b.totalC)}</button>`;
   $('#pm').value = b.payment.method || 'ecocash';
-  $('#pay').onclick = async () => { try { const r = await api(`/bookings/${b.id}/pay`, 'POST', { method: $('#pm').value, outcome: $('#fail').checked ? 'fail' : 'ok' });
-    if (r.payment.status === 'paid') { P.receipt = r; } else toast('Payment failed (simulated)'); P.key = null; tickP(); } catch (x) { toast(x.message); } };
+  $('#pay').onclick = async () => { try { await api(`/bookings/${b.id}/pay`, 'POST', { method: $('#pm').value, outcome: ($('#fail') || {}).checked ? 'fail' : 'ok' }); P.key = null; tickP(); } catch (x) { toast(x.message); } };
 }
 function renderReceipt(b) {
-  $('#panel').innerHTML = `<h2>Receipt</h2><p><span class="badge ok">PAID (SIMULATED)</span></p><p class="hint">Ref ${esc(b.payment.ref)} · ${esc(b.payment.method)} · ${new Date(b.payment.at).toLocaleString()}</p>${breakdown(b)}
-  ${b.rating ? `<p>You rated this trip ${'★'.repeat(b.rating.stars)}</p>` : `<label>Rate your driver</label><div class="stars" id="stars">${[1, 2, 3, 4, 5].map(i => `<button data-star="${i}">★</button>`).join('')}</div>`}
+  $('#panel').innerHTML = `${successSvg()}<h2 style="text-align:center">Payment confirmed</h2><p style="text-align:center"><span class="badge ok">PAID${sbx(' (SANDBOX)')}</span></p><p class="hint">Ref ${esc(b.payment.ref)} · ${esc(b.payment.method)} · ${new Date(b.payment.at).toLocaleString()}</p>${breakdown(b)}
+  ${b.rating ? `<p>You rated this trip ${'★'.repeat(b.rating.stars)}</p>` : `<label>Rate your driver</label><input id="rc" maxlength="200" placeholder="Add a comment (optional)"><div class="stars" id="stars">${[1, 2, 3, 4, 5].map(i => `<button data-star="${i}">★</button>`).join('')}</div>`}
   <div class="actions"><button class="btn" id="nr">Book another ride</button><button class="btn ghost" id="pr">Print receipt</button></div>`;
   $$('[data-star]').forEach(s => { s.onmouseenter = () => $$('[data-star]').forEach(x => x.classList.toggle('on', +x.dataset.star <= +s.dataset.star));
-    s.onclick = async () => { try { P.receipt = await api(`/bookings/${b.id}/rate`, 'POST', { stars: +s.dataset.star }); toast('Thanks for rating your driver'); renderReceipt(P.receipt); } catch (x) { toast(x.message); } }; });
+    s.onclick = async () => { try { P.receipt = await api(`/bookings/${b.id}/rate`, 'POST', { stars: +s.dataset.star, comment: ($('#rc') || {}).value || '' }); toast('Thanks for rating your driver'); renderReceipt(P.receipt); } catch (x) { toast(x.message); } }; });
   $('#pr').onclick = () => print();
   $('#nr').onclick = () => { P.receipt = null; P.key = null; tickP(); };
 }
 views.history = async () => {
   const l = (await api('/bookings')).filter(b => !ACTIVE.includes(b.status));
-  main.innerHTML = `<div class="card"><h2>My trips</h2><div class="wrap"><table><tr><th>Date</th><th>Route</th><th>Status</th><th class="r">Trip fare</th><th class="r">Service fee</th><th class="r">Total paid</th></tr>` +
-    (l.map(b => `<tr><td>${new Date(b.createdAt).toLocaleDateString()}</td><td>${esc(b.fromName)} → ${esc(b.toName)}<br><span class="hint">${typeLabel(b)}</span></td><td>${b.status}${b.status === 'completed' ? ' · ' + b.payment.status : ''}${b.cancel?.feeC ? ' · fee ' + money(b.cancel.feeC) + (b.cancel.waived ? ' (waived)' : '') : ''}</td><td class="r">${money(b.fareC)}</td><td class="r">${money(b.feeC)}</td><td class="r">${money(b.totalC)}</td></tr>`).join('') || '<tr><td colspan="6">No trips yet.</td></tr>') + `</table></div><p class="sim">Demo rides — simulated payments</p></div>`;
+  main.innerHTML = `<div class="card"><h2>My trips</h2><div class="wrap"><table><tr><th>Date</th><th>Route</th><th>Status</th><th class="r">Fare</th><th class="r">Fee</th><th class="r">Total</th><th class="r">Driver</th><th class="r">Commission</th></tr>` +
+    (l.map(b => `<tr><td>${new Date(b.createdAt).toLocaleDateString()}</td><td>${esc(b.fromName)} → ${esc(b.toName)}<br><span class="hint">${typeLabel(b)}</span></td><td>${b.status}${b.status === 'completed' ? ' · ' + b.payment.status : ''}${b.cancel?.feeC ? ' · fee ' + money(b.cancel.feeC) + (b.cancel.waived ? ' (waived)' : '') : ''}</td><td class="r">${money(b.fareC)}</td><td class="r">${money(b.feeC)}</td><td class="r">${money(b.totalC)}</td><td class="r">${money(b.driverC)}</td><td class="r">${money(b.commissionC)}</td></tr>`).join('') || '<tr><td colspan="8">No trips yet.</td></tr>') + `</table></div><p class="sim">Demo rides — simulated payments</p></div>`;
 };
 
 // ---------- driver
@@ -250,7 +242,7 @@ views.driver = async () => {
   main.innerHTML = `<div class="grid2"><section class="card" id="dStat"></section><section class="card"><h2>Active trip</h2><div id="dTrip"></div><div id="map" class="mini"></div></section><section class="card" id="dReq"></section><section class="card" id="dEarn"></section></div>`; initMap();
   const hidden = new Set();
   main.onclick = async e => { const b = e.target.closest('[data-act]'); if (!b) return; const { act, id, type } = b.dataset;
-    try { if (act === 'reject') hidden.add(id); else if (act === 'dcancel') await api(`/bookings/${id}/cancel`, 'POST', { reason: prompt('Reason') || '' }); else if (act === 'counteroffer') { const raw = prompt('Enter your counteroffer in USD (for example 5.50):'); if (raw === null) return; const amountC = Math.round(Number(raw) * 100); await api(`/bookings/${id}/counteroffer`, 'POST', { amountC }); toast('Counteroffer sent to passenger'); } else if (act === 'start') await api(`/bookings/${id}/start`, 'POST', { pin: prompt("Enter the passenger's 4-digit ride PIN") || '' }); else if (act === 'complete' && type === 'package') await api(`/bookings/${id}/complete`, 'POST', { dcode: prompt("Enter the recipient's 4-digit delivery code") || '' }); else await api(`/bookings/${id}/${act}`, 'POST'); await tickD(hidden); } catch (x) { toast(x.message); } };
+    try { if (act === 'reject') hidden.add(id); else if (act === 'dcancel') await api(`/bookings/${id}/cancel`, 'POST', { reason: (await ask('Cancel this trip?', 'Reason (optional)')) ?? '' }); else if (act === 'start') await api(`/bookings/${id}/start`, 'POST', { pin: await askReq('Ride PIN', "Ask the passenger for their 4-digit PIN", { inputmode: 'numeric', max: 4 }) }); else if (act === 'complete' && type === 'package') await api(`/bookings/${id}/complete`, 'POST', { dcode: await askReq('Delivery code', "Ask the recipient for their 4-digit code", { inputmode: 'numeric', max: 4 }) }); else await api(`/bookings/${id}/${act}`, 'POST'); await tickD(hidden); } catch (x) { toast(x.message); } };
   await tickD(hidden); timer = setInterval(() => tickD(hidden), 3000);
 };
 async function tickD(hidden) {
@@ -272,8 +264,8 @@ async function tickD(hidden) {
     ${a.status !== 'in_progress' ? `<button class="btn sm red" data-act="dcancel" data-id="${a.id}">Cancel</button>` : ''}</div>`).join('') : '<p class="hint">No active trip.</p>';
   if (act && shownRoute !== act.id) { shownRoute = act.id; drawBooking(await api('/bookings/' + act.id)); } else if (!act && shownRoute) { shownRoute = null; ['from', 'to', 'route', 'drv'].forEach(k => layers[k] && (map.removeLayer(layers[k]), delete layers[k])); }
   const reqs = me.status === 'approved' && me.online && !acts.length ? l.filter(b => b.status === 'searching' && !hidden.has(b.id)) : [];
-  $('#dReq').innerHTML = `<h2>Ride requests</h2>` + (reqs.map(b => `<div class="req"><b>${esc(b.fromName)} → ${esc(b.toName)}</b> <span class="badge">${typeLabel(b)}</span><br><span class="hint">${b.km} km · ${b.pkg ? esc(b.pkg.category) + ', ' + esc(b.pkg.size) + ' · ' : ''}passenger offer <b>${money(b.offerC || b.totalC)}</b> · you earn ${money(b.driverC)} (commission ${money(b.commissionC)})</span><br>
-    <button class="btn sm green" data-act="accept" data-id="${b.id}">Accept offer</button> <button class="btn sm" data-act="counteroffer" data-id="${b.id}">Counteroffer</button> <button class="btn sm ghost" data-act="reject" data-id="${b.id}">Reject</button></div>`).join('') || `<p class="hint">${me.online ? 'Waiting for requests…' : 'Go online to receive requests.'}</p>`);
+  $('#dReq').innerHTML = `<h2>Ride requests</h2>` + (reqs.map(b => `<div class="req"><b>${esc(b.fromName)} → ${esc(b.toName)}</b> <span class="badge">${typeLabel(b)}</span><br><span class="hint">${b.km} km · ${b.pkg ? esc(b.pkg.category) + ', ' + esc(b.pkg.size) + ' · ' : ''}you earn ${money(b.driverC)} (commission ${money(b.commissionC)})</span><br>
+    <button class="btn sm green" data-act="accept" data-id="${b.id}">Accept</button> <button class="btn sm ghost" data-act="reject" data-id="${b.id}">Reject</button></div>`).join('') || `<p class="hint">${me.online ? 'Waiting for requests…' : 'Go online to receive requests.'}</p>`);
   const s = x => `<div><span class="hint">${x[0]}</span><b>${money(x[1].netC)}</b><span class="hint">${x[1].trips} trips · fare ${money(x[1].fareC)} · commission −${money(x[1].commissionC)}</span></div>`;
   $('#dEarn').innerHTML = `<h2>Earnings</h2><div class="stat">${s(['Today', er.today])}${s(['This month', er.month])}${s(['All time', er.all])}</div><br><div class="wrap"><table><tr><th>Trip</th><th class="r">Fare</th><th class="r">Commission</th><th class="r">You earn</th><th>Payment</th></tr>` +
     (er.trips.map(b => `<tr><td>${esc(b.toName).slice(0, 24)}</td><td class="r">${money(b.fareC)}</td><td class="r">−${money(b.commissionC)}</td><td class="r">${money(b.driverC)}</td><td>${b.payment.status}${b.payment.simulated ? ' (sim)' : ''}</td></tr>`).join('') || '<tr><td colspan="5">No completed trips yet.</td></tr>') + `</table></div>`;
@@ -281,19 +273,19 @@ async function tickD(hidden) {
 
 // ---------- admin
 views.admin = async () => {
-  const tabs = ['Drivers', 'Bookings', 'Towns', 'Pricing', 'Transactions', 'Revenue', 'Safety', 'Audit'];
+  const tabs = ['Reports', 'Drivers', 'Passengers', 'Bookings', 'Towns', 'Pricing', 'Payments', 'Payouts', 'Support', 'Revenue', 'Safety', 'Audit'];
   main.innerHTML = `<div class="tabs">${tabs.map(t => `<button class="btn sm" data-t="${t}">${t}</button>`).join('')}</div><div class="card" id="ab"></div>`;
   const show = async t => { $$('[data-t]').forEach(b => b.classList.toggle('on', b.dataset.t === t)); try { await adminTabs[t]($('#ab')); } catch (x) { toast(x.message); } };
   $$('[data-t]').forEach(b => b.onclick = () => show(b.dataset.t)); main.onclick = async e => {
     const s = e.target.closest('[data-st]'), w = e.target.closest('[data-w]');
     try { if (s) { await api(`/admin/drivers/${s.dataset.id}/status`, 'POST', { status: s.dataset.st }); show('Drivers'); } if (w) { await api(`/admin/bookings/${w.dataset.w}/waive`, 'POST'); show('Bookings'); } } catch (x) { toast(x.message); } };
-  main.onchange = async e => { const s = e.target.closest('[data-dt]'); if (!s) return; try { await api(`/admin/drivers/${s.dataset.dt}/town`, 'POST', { townId: s.value }); toast('Driver town updated'); } catch (x) { toast(x.message); } };
-  show('Drivers');
+  main.onchange = async e => { const dc = e.target.closest('[data-doc]'); if (dc) { try { await api(`/admin/drivers/${dc.dataset.id}/verify`, 'POST', { field: dc.dataset.doc, value: dc.checked }); } catch (x) { toast(x.message); dc.checked = !dc.checked; } return; } const s = e.target.closest('[data-dt]'); if (!s) return; try { await api(`/admin/drivers/${s.dataset.dt}/town`, 'POST', { townId: s.value }); toast('Driver town updated'); } catch (x) { toast(x.message); } };
+  show('Reports');
 };
 const adminTabs = {
   async Drivers(el) { const l = await api('/admin/drivers'), towns = await api('/admin/towns');
-    el.innerHTML = `<h2>Driver verification</h2><div class="wrap"><table><tr><th>Driver</th><th>ID / Licence (expiry)</th><th>Vehicle</th><th>Town</th><th>Status</th><th></th></tr>` + (l.map(d => `<tr><td>${esc(d.name)}<br><span class="hint">${esc(d.phone)}</span></td><td>${esc(d.driver.idNumber)} (${d.driver.idExpiry})<br>${esc(d.driver.licenceNumber)} (${d.driver.licenceExpiry})</td>
-      <td>${esc(d.driver.vehicle.make)} ${esc(d.driver.vehicle.model)} ${d.driver.vehicle.year}<br>${esc(d.driver.vehicle.reg)}</td><td><select data-dt="${d.id}">${towns.map(t => `<option value="${t.id}" ${t.id === d.townId ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select></td><td><span class="badge">${d.status}</span></td>
+    el.innerHTML = `<h2>Driver verification</h2><div class="wrap"><table><tr><th>Driver</th><th>ID / Licence (expiry)</th><th>Vehicle</th><th>Documents verified</th><th>Town</th><th>Status</th><th></th></tr>` + (l.map(d => `<tr><td>${esc(d.name)}<br><span class="hint">${esc(d.phone)}</span></td><td>${esc(d.driver.idNumber)} (${d.driver.idExpiry})<br>${esc(d.driver.licenceNumber)} (${d.driver.licenceExpiry})</td>
+      <td>${esc(d.driver.vehicle.make)} ${esc(d.driver.vehicle.model)} ${d.driver.vehicle.year}<br>${esc(d.driver.vehicle.reg)}</td>${docCell(d)}<td><select data-dt="${d.id}">${towns.map(t => `<option value="${t.id}" ${t.id === d.townId ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select></td><td><span class="badge">${d.status}</span></td>
       <td>${['approved', 'rejected', 'suspended'].filter(s => s !== d.status).map(s => `<button class="btn sm ${s === 'approved' ? 'green' : 'red'}" data-st="${s}" data-id="${d.id}">${s === 'approved' ? (d.status === 'suspended' ? 'Reinstate' : 'Approve') : s[0].toUpperCase() + s.slice(1, -2)}</button>`).join(' ')}</td></tr>`).join('') || '<tr><td colspan="5">No drivers.</td></tr>') + `</table></div>`; },
   async Bookings(el) { const l = await api('/bookings');
     el.innerHTML = `<h2>Bookings</h2><div class="wrap"><table><tr><th>ID</th><th>Passenger</th><th>Driver</th><th>Route</th><th>Status</th><th class="r">Total</th><th>Cancellation</th></tr>` + (l.map(b => `<tr><td>${b.id}</td><td>${esc(b.passenger?.name)}</td><td>${esc(b.driver?.name || '—')}</td><td>${esc(b.fromName)} → ${esc(b.toName)}<br><span class="hint">${typeLabel(b)}</span></td><td>${b.status}</td><td class="r">${money(b.totalC)}</td>
@@ -319,8 +311,8 @@ const adminTabs = {
     $('#tf').onsubmit = async e => { e.preventDefault(); const f = form(e.target), polygon = f.poly.split('\n').map(x => x.trim()).filter(Boolean).map(x => x.split(',').map(Number));
       try { await api(f.id ? '/admin/towns/' + f.id : '/admin/towns', f.id ? 'PUT' : 'POST', { name: f.name, polygon }); toast('Town saved'); adminTabs.Towns(el); } catch (x) { toast(x.message); } }; },
   async Safety(el) { const l = await api('/admin/alerts');
-    el.innerHTML = `<h2>Safety alerts</h2><div class="wrap"><table><tr><th>Time</th><th>From</th><th>Phone</th><th>Trip</th><th>Status</th></tr>` + (l.map(a => `<tr><td>${new Date(a.at).toLocaleString()}</td><td>${esc(a.by)} (${a.role})</td><td>${esc(a.phone)}</td><td>${a.bookingId} · ${esc(a.route)}</td><td>${a.status}</td></tr>`).join('') || '<tr><td colspan="5">No SOS alerts.</td></tr>') + `</table></div>`; },
+    el.innerHTML = `<h2>Safety alerts</h2><div class="wrap"><table><tr><th>Time</th><th>From</th><th>Phone</th><th>Trip</th><th>Status</th></tr>` + (l.map(a => `<tr><td>${new Date(a.at).toLocaleString()}</td><td>${esc(a.by)} (${a.role})</td><td>${esc(a.phone)}${a.emergency ? '<br><span class="hint">Emergency: ' + esc(a.emergency.name) + ' ' + esc(a.emergency.phone) + '</span>' : ''}</td><td>${a.bookingId} · ${esc(a.route)}</td><td>${a.status}</td></tr>`).join('') || '<tr><td colspan="5">No SOS alerts.</td></tr>') + `</table></div>`; },
   async Audit(el) { const l = await api('/admin/audit');
     el.innerHTML = `<h2>Audit log</h2><div class="wrap"><table>` + (l.map(a => `<tr><td>${new Date(a.at).toLocaleString()}</td><td>${esc(a.by)}</td><td>${a.action}</td><td>${esc(a.detail).slice(0, 160)}</td></tr>`).join('') || '<tr><td>No admin actions yet.</td></tr>') + `</table></div>`; }
 };
-(async () => { await window.mapsReady; const sc = new URLSearchParams(location.search).get('share'); if (sc) { views.share(sc); return; } if (token) { try { me = (await api('/me')).user; } catch { token = null; localStorage.removeItem('zt'); } } home(); })();
+(async () => { await Promise.all([window.mapsReady, new Promise(r => document.readyState === 'complete' ? r() : addEventListener('load', r))]); const sc = new URLSearchParams(location.search).get('share'); if (sc) { views.share(sc); return; } if (token) { try { me = (await api('/me')).user; } catch { token = null; localStorage.removeItem('zt'); } } home(); })();

@@ -6,15 +6,14 @@ const DB_FILE = path.join(__dirname, 'data', 'db.json');
 let db;
 const C = x => Math.round(x * 100);                       // dollars -> integer cents (all money is cents)
 const hash = (pw, salt) => crypto.scryptSync(pw, salt, 32).toString('hex');
-const save = () => fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 1));
+const store = require('./lib/store')(__dirname), save = () => store.save(db);
 function addUser(o, pw) {
   const salt = crypto.randomBytes(16).toString('hex');
   const u = { id: 'u' + (++db.seq), salt, hash: hash(pw, salt), createdAt: Date.now(), ...o };
   db.users.push(u); return u;
 }
-function load() {
-  fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
-  if (fs.existsSync(DB_FILE)) { db = JSON.parse(fs.readFileSync(DB_FILE)); return; }
+function load(loaded) {
+  if (loaded) { db = loaded; return; }
   db = { secret: crypto.randomBytes(32).toString('hex'), seq: 0, users: [], bookings: [], txns: [], audit: [],
     config: { base: 0.5, perKm: 0.4, min: 1.5, mult: { economy: 1, comfort: 1.35, suv: 1.7 },
       serviceFeePct: 5, commissionPct: 5, cancelFee: 0.5, graceSeconds: 120 } };
@@ -24,10 +23,13 @@ function load() {
       vehicle: { make: 'Toyota', model: 'Aqua', year: 2016, reg: 'DEMO 1234', capacity: 4 }, settlement: 'ecocash', docsConfirmed: true } }, 'driver123');
   save();
 }
+const logErr = (type, msg, extra = {}) => { const line = JSON.stringify({ at: new Date().toISOString(), type, msg: String(msg).slice(0, 2000), ...extra }); console.error(line);
+  try { fs.mkdirSync(path.join(__dirname, 'logs'), { recursive: true }); fs.appendFileSync(path.join(__dirname, 'logs', 'error.log'), line + '\n'); } catch {} };
+process.on('uncaughtException', e => logErr('uncaught', e.stack || e)); process.on('unhandledRejection', e => logErr('unhandled', (e && e.stack) || e));
 const bad = (m, s = 400) => Object.assign(new Error(m), { status: s });
-const wrap = f => async (req, res) => { try { await f(req, res); } catch (e) { if (!e.status) console.error(e); res.status(e.status || 500).json({ error: e.status ? e.message : 'Server error' }); } };
+const wrap = f => async (req, res) => { try { await f(req, res); } catch (e) { if (!e.status) logErr('route', e.stack || String(e), { path: req.path }); res.status(e.status || 500).json({ error: e.status ? e.message : 'Server error' }); } };
 const str = (v, min = 1, max = 100) => typeof v === 'string' && v.trim().length >= min && v.length <= max;
-const pub = ({ salt, hash, ...r }) => ({ ...r, ...(r.townId ? { townName: (db.towns.find(t => t.id === r.townId) || {}).name } : {}) });
+const pub = ({ salt, hash, otp, ...r }) => ({ ...r, ...(r.townId ? { townName: (db.towns.find(t => t.id === r.townId) || {}).name } : {}) });
 // ---- towns / service areas (polygons are [lat,lng] pairs). Seeded shapes are rough ~10-25 km circles for the demo; refine in Admin > Towns.
 const circle = (lat, lng, r) => Array.from({ length: 12 }, (_, i) => { const t = i * Math.PI / 6; return [+(lat + r * Math.sin(t)).toFixed(4), +(lng + r * Math.cos(t) / 0.95).toFixed(4)]; });
 const SEED_TOWNS = [['Harare', -17.83, 31.05, .25], ['Bulawayo', -20.15, 28.58, .2], ['Mutare', -18.97, 32.67, .12], ['Gweru', -19.45, 29.82, .12], ['Masvingo', -20.07, 30.83, .1],
@@ -40,6 +42,8 @@ function inPoly(p, poly) {   // ray casting
 const townAt = p => db.towns.find(t => t.active && inPoly(p, t.polygon));
 const NOTOWN = 'ZIMOVA does not operate at this pickup location yet. Choose a pickup inside a gold service area on the map.';
 function migrate() {   // upgrades older data files in place
+  ['payments', 'payouts', 'notes', 'tickets'].forEach(k => { db[k] = db[k] || []; });
+  db.users.forEach(u => { if (u.role === 'driver' && u.driver && !u.driver.verified) u.driver.verified = u.status === 'approved' ? { id: true, licence: true, vehicle: true, insurance: true } : { id: false, licence: false, vehicle: false, insurance: false }; });
   if (!db.towns) db.towns = SEED_TOWNS;
   if (db.config.packagePerKm === undefined && db.config.sharedPerKm !== undefined) db.config.packagePerKm = 1;
   if (db.config.sharedPerKm === undefined) db.config = { base: 0, perKm: 1, sharedPerKm: 0.9, packagePerKm: 1, min: 1, mult: { private: 1 }, serviceFeePct: 0, commissionPct: 10, cancelFee: 0.5, graceSeconds: 120 };
@@ -64,6 +68,8 @@ const auth = (...roles) => (req, res, next) => {
   req.user = u; next();
 };
 const audit = (u, action, detail) => { db.audit.push({ at: Date.now(), by: u.email, action, detail }); };
+const notify = (uid, text, kind = 'info') => { if (!uid || !text) return; (db.notes = db.notes || []).push({ id: 'n' + (++db.seq), userId: uid, text, kind, at: Date.now(), read: false }); if (db.notes.length > 3000) db.notes.splice(0, 500); };
+const docsOk = u => { const v = (u.driver || {}).verified || {}; return v.id && v.licence && v.vehicle && v.insurance; };
 
 // ---- fares (server is authoritative)
 function fare(km, veh) {
@@ -99,7 +105,21 @@ async function route(a, b) {
   const r = j.routes[0]; return { km: Math.round(r.distance / 10) / 100, min: Math.round(r.duration / 60), geometry: r.geometry.coordinates };
 }
 
-const app = express(); app.use(express.json({ limit: '100kb' })); app.use(express.static(path.join(__dirname, 'public')));
+const security = (req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('X-Frame-Options', 'DENY'); res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin'); res.setHeader('Permissions-Policy', 'geolocation=(self), camera=(), microphone=()');
+  if (process.env.NODE_ENV === 'production') res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  if (process.env.NODE_ENV === 'production' && process.env.FORCE_HTTPS === '1' && req.headers['x-forwarded-proto'] === 'http') return res.redirect(301, 'https://' + req.headers.host + req.originalUrl); next();
+};
+const hits = new Map(); setInterval(() => { const n = Date.now(); for (const [k, v] of hits) if (v.r < n) hits.delete(k); }, 60000).unref();
+const rate = (req, res, next) => { if (req.path.startsWith('/webhooks')) return next(); const n = Date.now(); let h = hits.get(req.ip); if (!h || h.r < n) { h = { n: 0, r: n + 60000 }; hits.set(req.ip, h); }
+  if (++h.n > (+process.env.RATE_LIMIT || 600)) return res.status(429).json({ error: 'Too many requests. Slow down.' }); next(); };
+const idemCache = new Map();   // duplicate booking protection: the same Idempotency-Key returns the first result
+const idem = (req, res, next) => { const k = req.method === 'POST' && req.path === '/' && req.headers['idempotency-key']; if (!k) return next();
+  const key = (req.headers.authorization || '') + '|' + String(k).slice(0, 80), hit = idemCache.get(key); if (hit && hit.at > Date.now() - 6e5) return res.status(hit.s).json(hit.b);
+  const j = res.json.bind(res); res.json = b => { idemCache.set(key, { s: res.statusCode, b, at: Date.now() }); if (idemCache.size > 2000) idemCache.delete(idemCache.keys().next().value); return j(b); }; next(); };
+const app = express(); app.disable('x-powered-by'); if (process.env.TRUST_PROXY) app.set('trust proxy', 1);
+app.use(security); app.use('/api', rate); app.use('/api/bookings', idem); app.use(express.json({ limit: '100kb', verify: (req, res, buf) => { req.raw = buf; } })); app.use(express.static(path.join(__dirname, 'public')));
+app.get('/healthz', async (req, res) => { try { await store.ping(); res.json({ ok: true, store: store.kind, uptimeS: Math.round(process.uptime()) }); } catch (e) { res.status(503).json({ ok: false }); } });
 const tries = {};
 app.post('/api/auth/login', wrap((req, res) => {
   const n = tries[req.ip] = (tries[req.ip] || []).filter(t => t > Date.now() - 6e4);
@@ -120,12 +140,13 @@ function register(role) {
       const d = b.driver || {}, v = d.vehicle || {}, fut = s => /^\d{4}-\d{2}-\d{2}$/.test(s || '') && new Date(s) > new Date();
       if (!str(d.idNumber, 5, 30) || !fut(d.idExpiry) || !str(d.licenceNumber, 4, 30) || !fut(d.licenceExpiry)) throw bad('ID and licence numbers with future expiry dates are required');
       if (!str(v.make, 2, 30) || !str(v.model, 1, 30) || !str(v.reg, 3, 15) || !(+v.capacity >= 1 && +v.capacity <= 14) || !(+v.year >= 1990 && +v.year <= 2027)) throw bad('Complete vehicle details are required');
+      if (!str(d.insuranceNumber, 4, 40) || !fut(d.insuranceExpiry) || !str(d.regBook, 3, 40)) throw bad('Insurance policy number and expiry, and the vehicle registration book number, are required');
       if (!['ecocash', 'bank', 'card'].includes(d.settlement)) throw bad('Choose a settlement method');
       const tw = db.towns.find(t => t.id === d.townId && t.active); if (!tw) throw bad('Choose your operating town');
       if (d.docsConfirmed !== true) throw bad('Confirm that the sample (fictional) documents are attached');
       o.status = 'pending'; o.online = false; o.townId = tw.id;
       o.driver = { idNumber: d.idNumber.trim(), idExpiry: d.idExpiry, licenceNumber: d.licenceNumber.trim(), licenceExpiry: d.licenceExpiry,
-        vehicle: { make: v.make.trim(), model: v.model.trim(), year: +v.year, reg: v.reg.trim(), capacity: +v.capacity }, settlement: d.settlement, docsConfirmed: true };
+        vehicle: { make: v.make.trim(), model: v.model.trim(), year: +v.year, reg: v.reg.trim(), capacity: +v.capacity }, settlement: d.settlement, insuranceNumber: d.insuranceNumber.trim(), insuranceExpiry: d.insuranceExpiry, regBook: d.regBook.trim(), verified: { id: false, licence: false, vehicle: false, insurance: false }, docsConfirmed: true };
     }
     const u = addUser(o, b.password); save(); res.json({ token: sign({ id: u.id, exp: Date.now() + 7 * 864e5 }), user: pub(u) });
   });
@@ -145,7 +166,7 @@ app.get('/api/towns', (req, res) => res.json(db.towns.filter(t => t.active)));
 app.post('/api/quote', auth('passenger'), wrap(async (req, res) => {
   const [a, z] = pts(req.body), tn = townAt(a); if (!tn) throw bad(NOTOWN, 422);
   const r = await route(a, z);
-  res.json({ ...r, town: tn.name, fares: Object.fromEntries(['private', 'shared', 'package'].map(v => [v, fare(r.km, v)])) });
+  res.json({ ...r, town: tn.name, driversOnline: db.users.filter(u => u.role === 'driver' && u.status === 'approved' && u.online && u.townId === tn.id).length, fares: Object.fromEntries(['private', 'shared', 'package'].map(v => [v, fare(r.km, v)])) });
 }));
 
 // ---- bookings
@@ -156,20 +177,7 @@ const LIVE = ['searching', 'accepted', 'arrived', 'in_progress'];
 const bk = id => db.bookings.find(b => b.id === id) || (() => { throw bad('Booking not found', 404); })();
 function view(b, full) {
   const { geometry, pin, dcode, ...r } = b, d = b.driverId && db.users.find(u => u.id === b.driverId), p = db.users.find(u => u.id === b.passengerId);
-  const offers = (b.counteroffers || (b.counteroffer ? [b.counteroffer] : [])).map(co => { const cu = db.users.find(x => x.id === co.driverId); return { id: co.id || String(co.driverId), amountC: co.amountC, status: co.status, at: co.at, driver: cu ? { name: cu.name, rating: drvRating(cu.id), vehicle: cu.driver.vehicle } : null }; });
-  return { ...(full ? (({ pin, dcode, ...x }) => x)(b) : r), driver: d && { name: d.name, phone: d.phone, vehicle: d.driver.vehicle, rating: drvRating(d.id) }, passenger: p && { name: b.type === 'shared' ? p.name.split(' ')[0] : p.name }, driverLoc: liveLoc(b), counteroffer: offers.find(x => x.status === 'pending') || null, counteroffers: offers };
-}
-
-function passengerView(b, full = false) {
-  const r = view(b, full);
-  // These values are internal settlement data and must never be sent to a passenger.
-  delete r.driverC;
-  delete r.commissionC;
-  if (r.rates) {
-    r.rates = { ...r.rates };
-    delete r.rates.commissionPct;
-  }
-  return r;
+  return { ...(full ? (({ pin, dcode, ...x }) => x)(b) : r), driver: d && { name: d.name, phone: d.phone, vehicle: d.driver.vehicle, rating: drvRating(d.id) }, passenger: p && { name: b.type === 'shared' ? p.name.split(' ')[0] : p.name }, driverLoc: liveLoc(b) };
 }
 // ---- booking types: private | shared | package | someone (ride for someone else)
 const PROHIBITED = /\b(gun|firearm|pistol|rifle|ammo|ammunition|explosive|bomb|grenade|dynamite|fireworks|drug|cocaine|heroin|marijuana|cannabis|dagga|mbanje|poison|acid|petrol|diesel|fuel|weapon|knife)s?\b/i;
@@ -198,66 +206,33 @@ function matchGroup(a, z, townId) {   // compatible route: pickups within 3 km, 
   }
 }
 app.post('/api/bookings', auth('passenger'), wrap(async (req, res) => {
+  if (!req.user.phoneVerified) throw bad('Please verify your phone number first (Profile > Verify phone).', 403);
   const [a, z] = pts(req.body), b = req.body, tn = townAt(a); if (!tn) throw bad(NOTOWN, 422);
   if (!['ecocash', 'visa', 'mastercard'].includes(b.pay)) throw bad('Choose a payment method');
   if (db.bookings.some(x => x.passengerId === req.user.id && LIVE.includes(x.status))) throw bad('You already have an active booking', 409);
   const type = ['private', 'shared', 'package', 'someone'].includes(b.type) ? b.type : 'private', extra = validateExtra(type, b);
   const r = await route(a, z), f = fare(r.km, type === 'someone' ? 'private' : type);        // fare recomputed on the server, browser values ignored
-  // Passenger may propose a fair price. Drivers see this offer before accepting; server validates it.
-  const offerC = b.offerC == null ? f.totalC : Math.round(+b.offerC);
-  if (!Number.isFinite(offerC) || offerC < Math.round(f.totalC * 0.5) || offerC > Math.round(f.totalC * 2)) throw bad('Your offer must be between 50% and 200% of the suggested fare.');
-  f.fareC = Math.max(0, offerC - f.feeC); f.totalC = offerC; f.commissionC = Math.round(f.fareC * db.config.commissionPct / 100); f.driverC = f.fareC - f.commissionC;
-  const bo = { id: 'b' + (++db.seq), offerC, suggestedFareC: fare(r.km, type === 'someone' ? 'private' : type).totalC, passengerId: req.user.id, from: a, to: z, fromName: String(b.fromName || '').slice(0, 120), toName: String(b.toName || '').slice(0, 120),
+  const bo = { id: 'b' + (++db.seq), passengerId: req.user.id, from: a, to: z, fromName: String(b.fromName || '').slice(0, 120), toName: String(b.toName || '').slice(0, 120),
     status: 'searching', type, ...extra, townId: tn.id, pin: String(crypto.randomInt(1000, 10000)), etaMin: r.min, geometry: r.geometry, ...f, payment: { status: 'unpaid', method: b.pay, simulated: true }, createdAt: Date.now() };
   if (type === 'shared') { const m = matchGroup(a, z, tn.id); bo.groupId = m ? m.gid : bo.id; if (m && m.driverId) { bo.driverId = m.driverId; bo.acceptedAt = Date.now(); bo.status = 'accepted'; } }
-  db.bookings.push(bo); save(); res.json({ ...passengerView(bo), pin: bo.pin, dcode: bo.dcode });
+  db.bookings.push(bo); save(); res.json({ ...view(bo), pin: bo.pin, dcode: bo.dcode });
 }));
 app.get('/api/bookings', auth(), (req, res) => {
   const u = req.user; let l = db.bookings;
   if (u.role === 'passenger') l = l.filter(b => b.passengerId === u.id);
   else if (u.role === 'driver') l = l.filter(b => b.driverId === u.id || (b.status === 'searching' && u.status === 'approved' && b.townId === u.townId));
-  res.json(l.slice().sort((a, b) => b.createdAt - a.createdAt).map(b => u.role === 'passenger' ? { ...passengerView(b), pin: b.pin, dcode: b.dcode } : view(b)));
+  res.json(l.slice().sort((a, b) => b.createdAt - a.createdAt).map(b => u.role === 'passenger' ? { ...view(b), pin: b.pin, dcode: b.dcode } : view(b)));
 });
 app.get('/api/bookings/:id', auth(), wrap((req, res) => {
   const b = bk(req.params.id), u = req.user;
   const ok = u.role === 'admin' || b.passengerId === u.id || b.driverId === u.id || (u.role === 'driver' && u.status === 'approved' && b.status === 'searching' && b.townId === u.townId);
-  if (!ok) throw bad('Not allowed', 403); res.json(u.role === 'passenger' ? { ...passengerView(b, true), pin: b.pin, dcode: b.dcode } : view(b, true));
+  if (!ok) throw bad('Not allowed', 403); res.json(u.role === 'passenger' ? { ...view(b, true), pin: b.pin, dcode: b.dcode } : view(b, true));
 }));
 const T = { accept: ['searching', 'accepted'], arrive: ['accepted', 'arrived'], start: ['arrived', 'in_progress'], complete: ['in_progress', 'completed'] };
-// Multiple drivers may independently submit one counteroffer each. Passenger chooses one.
-app.post('/api/bookings/:id/counteroffer', auth('driver'), wrap((req, res) => {
-  const b = bk(req.params.id), u = req.user, amountC = Math.round(Number(req.body.amountC));
-  if (b.status !== 'searching' || b.driverId) throw bad('This request is no longer available', 409);
-  if (u.status !== 'approved' || !u.online || u.townId !== b.townId) throw bad('You must be an approved, online driver in the pickup town', 403);
-  if (db.bookings.some(x => x.driverId === u.id && ['accepted', 'arrived', 'in_progress'].includes(x.status))) throw bad('Finish your current trip first', 409);
-  if (!Number.isFinite(amountC) || amountC < Math.round(b.suggestedFareC * 0.5) || amountC > Math.round(b.suggestedFareC * 2)) throw bad('Counteroffer must be between 50% and 200% of the suggested fare');
-  b.counteroffers = b.counteroffers || (b.counteroffer ? [b.counteroffer] : []);
-  const prior = b.counteroffers.find(x => x.driverId === u.id);
-  if (prior) { prior.amountC = amountC; prior.at = Date.now(); prior.status = 'pending'; }
-  else b.counteroffers.push({ id: 'co' + (++db.seq), driverId: u.id, amountC, at: Date.now(), status: 'pending' });
-  delete b.counteroffer; save(); res.json({ ok: true, offers: b.counteroffers.length });
-}));
-app.post('/api/bookings/:id/counteroffer/respond', auth('passenger'), wrap((req, res) => {
-  const b = bk(req.params.id), choice = req.body.choice, offerId = String(req.body.offerId || '');
-  if (b.passengerId !== req.user.id) throw bad('Not allowed', 403);
-  b.counteroffers = b.counteroffers || (b.counteroffer ? [b.counteroffer] : []);
-  const co = b.counteroffers.find(x => (x.id || String(x.driverId)) === offerId && x.status === 'pending');
-  if (b.status !== 'searching' || !co) throw bad('That driver offer is no longer available', 409);
-  if (choice === 'accept') {
-    const driver = db.users.find(u => u.id === co.driverId);
-    if (!driver || driver.status !== 'approved' || !driver.online || driver.townId !== b.townId) throw bad('That driver is no longer available', 409);
-    const totalC = co.amountC, feeC = Math.round((b.feeC || 0));
-    b.totalC = totalC; b.fareC = Math.max(0, totalC - feeC); b.commissionC = Math.round(b.fareC * db.config.commissionPct / 100); b.driverC = b.fareC - b.commissionC;
-    b.offerC = totalC; b.driverId = driver.id; b.acceptedAt = Date.now(); b.status = 'accepted'; co.status = 'accepted';
-    b.counteroffers.forEach(x => { if (x !== co && x.status === 'pending') x.status = 'closed'; });
-  } else if (choice === 'decline') { co.status = 'declined'; co.respondedAt = Date.now(); } else throw bad('Choose accept or decline');
-  save(); res.json({ ...passengerView(b), pin: b.pin, dcode: b.dcode });
-}));
 app.post('/api/bookings/:id/:action(accept|arrive|start|complete)', auth('driver'), wrap((req, res) => {
   const a = req.params.action, b = bk(req.params.id), [from, to] = T[a], u = req.user;
   if (b.status !== from) throw bad(`Booking is "${b.status}"; cannot ${a}`, 409);   // blocks invalid / duplicate transitions
   if (a === 'accept') {
-    if ((b.counteroffers || (b.counteroffer ? [b.counteroffer] : [])).some(co => co.status === 'pending')) throw bad('The passenger is comparing driver offers; wait for their decision', 409);
     if (u.status !== 'approved') throw bad('Only approved drivers can accept rides', 403);
     if (!u.online) throw bad('Go online first', 409);
     if (b.townId !== u.townId) throw bad('This pickup is outside your approved town', 403);
@@ -268,6 +243,7 @@ app.post('/api/bookings/:id/:action(accept|arrive|start|complete)', auth('driver
   } else if (b.driverId !== u.id) throw bad('Not your trip', 403);
   if (a === 'start' && b.pin && String(req.body.pin || '') !== b.pin) throw bad('Incorrect ride PIN. Ask the passenger for their 4-digit PIN.', 403);   // trust: right driver, right passenger
   if (a === 'complete' && b.type === 'package' && String(req.body.dcode || '') !== b.dcode) throw bad('Incorrect delivery code. Ask the recipient for their 4-digit code.', 403);
+  notify(b.passengerId, { accept: `${req.user.name.split(' ')[0]} is on the way to pick you up.`, arrive: 'Your driver has arrived.', start: 'Your trip has started.', complete: 'Trip completed. Please pay in the app.' }[a], 'trip');
   b.status = to; if (a === 'complete') { b.completedAt = Date.now(); if (!db.bookings.some(x => x !== b && x.driverId === u.id && ['accepted', 'arrived', 'in_progress'].includes(x.status))) delete LOC[u.id]; b.payment = { ...b.payment, status: 'pending' }; }
   save(); res.json(view(b));
 }));
@@ -282,23 +258,15 @@ app.post('/api/bookings/:id/cancel', auth('passenger', 'driver'), wrap((req, res
   if (u.role === 'passenger') {
     if (b.passengerId !== u.id) throw bad('Not allowed', 403);
     const feeC = cancelFee(b);
+    notify(b.driverId, 'The passenger cancelled the trip.', 'trip');
     b.status = 'cancelled'; b.cancel = { by: 'passenger', at: Date.now(), reason, feeC, waived: false, payment: feeC ? 'owed (simulated, not charged)' : 'n/a' };
   } else {                                              // driver cancels: no passenger fee, ride goes back to the pool
     if (b.driverId !== u.id) throw bad('Not allowed', 403);
     (b.cancelLog = b.cancelLog || []).push({ by: 'driver', at: Date.now(), reason, feeC: 0 });
+    notify(b.passengerId, 'Your driver cancelled. We are finding you another driver.', 'trip');
     b.status = 'searching'; b.driverId = null; b.acceptedAt = null;
   }
-  save(); res.json(u.role === 'passenger' ? passengerView(b) : view(b));
-}));
-app.post('/api/bookings/:id/pay', auth('passenger'), wrap((req, res) => {
-  const b = bk(req.params.id); if (b.passengerId !== req.user.id) throw bad('Not allowed', 403);
-  if (b.status !== 'completed') throw bad('Trip is not completed', 409);
-  if (b.payment.status === 'paid') return res.json(passengerView(b));            // idempotent: never pay twice
-  if (!['ecocash', 'visa', 'mastercard'].includes(req.body.method)) throw bad('Choose a payment method');
-  const ok = req.body.outcome !== 'fail', ref = 'SIM-' + crypto.randomBytes(4).toString('hex').toUpperCase();
-  b.payment = { status: ok ? 'paid' : 'failed', method: req.body.method, ref, at: Date.now(), amountC: b.totalC, simulated: true };
-  db.txns.push({ ref, bookingId: b.id, method: req.body.method, amountC: b.totalC, status: b.payment.status, at: Date.now(), simulated: true });
-  save(); res.json(passengerView(b));
+  save(); res.json(view(b));
 }));
 
 // ---- trust & safety: rating, share-trip link, SOS
@@ -308,7 +276,7 @@ app.post('/api/bookings/:id/rate', auth('passenger'), wrap((req, res) => {
   if (b.status !== 'completed') throw bad('You can rate a driver after the trip is completed', 409);
   if (b.rating) throw bad('You already rated this trip', 409);
   if (!(n >= 1 && n <= 5)) throw bad('Choose 1 to 5 stars');
-  b.rating = { stars: n, comment: String(req.body.comment || '').slice(0, 200), at: Date.now() }; save(); res.json(passengerView(b));
+  b.rating = { stars: n, comment: String(req.body.comment || '').slice(0, 200), at: Date.now() }; save(); res.json(view(b));
 }));
 app.post('/api/bookings/:id/share', auth('passenger'), wrap((req, res) => {
   const b = bk(req.params.id); if (b.passengerId !== req.user.id) throw bad('Not allowed', 403);
@@ -321,7 +289,7 @@ app.get('/api/share/:code', wrap((req, res) => {   // public, read-only, unguess
 }));
 app.post('/api/bookings/:id/sos', auth('passenger', 'driver'), wrap((req, res) => {
   const b = bk(req.params.id), u = req.user; if (b.passengerId !== u.id && b.driverId !== u.id) throw bad('Not allowed', 403);
-  (db.alerts = db.alerts || []).push({ at: Date.now(), by: u.name, role: u.role, phone: u.phone, bookingId: b.id, route: b.fromName + ' → ' + b.toName, status: b.status });
+  (db.alerts = db.alerts || []).push({ at: Date.now(), by: u.name, role: u.role, phone: u.phone, emergency: u.emergency || null, bookingId: b.id, route: b.fromName + ' → ' + b.toName, status: b.status });
   save(); res.json({ ok: true });
 }));
 
@@ -343,7 +311,9 @@ app.get('/api/admin/drivers', A, (req, res) => res.json(db.users.filter(u => u.r
 app.post('/api/admin/drivers/:id/status', A, wrap((req, res) => {
   const u = db.users.find(x => x.id === req.params.id && x.role === 'driver'); if (!u) throw bad('Driver not found', 404);
   if (!['approved', 'rejected', 'suspended', 'pending'].includes(req.body.status)) throw bad('Invalid status');
+  if (req.body.status === 'approved' && !docsOk(u)) throw bad('Verify ID, licence, vehicle registration and insurance before approving', 409);
   u.status = req.body.status; if (u.status !== 'approved') u.online = false;
+  notify(u.id, { approved: 'Your driver account is approved. You can go online now.', rejected: 'Your driver application was not approved. Contact support for details.', suspended: 'Your driver account was suspended.' }[u.status], 'account');
   audit(req.user, 'driver_status', `${u.email} -> ${u.status}`); save(); res.json(pub(u));
 }));
 app.put('/api/admin/config', A, wrap((req, res) => {
@@ -386,4 +356,9 @@ app.post('/api/admin/drivers/:id/town', A, wrap((req, res) => {
 }));
 app.get('/api/admin/alerts', A, (req, res) => res.json((db.alerts || []).slice().reverse().slice(0, 50)));
 
-load(); migrate(); app.listen(PORT, () => console.log(`ZIMOVA running at http://localhost:${PORT}\nAdmin: admin@zimova.test / admin123   Driver: driver@zimova.test / driver123 (change in .env)`));
+store.init().then(loaded => {
+  load(loaded); migrate();
+  require('./lib/extra')({ app, D: () => db, save, auth, A, wrap, bad, str, audit, notify, view, bk, pub, PORT, logErr, store });
+  const server = app.listen(PORT, () => console.log(`ZIMOVA running at http://localhost:${PORT}  (storage: ${store.kind}, payments: ${process.env.PAYMENT_PROVIDER || 'sandbox'})`));
+  const stop = async () => { server.close(); await store.flush(); process.exit(0); }; process.on('SIGTERM', stop); process.on('SIGINT', stop);
+}).catch(e => { logErr('startup', e.stack || e); process.exit(1); });
