@@ -7,7 +7,7 @@ const osmReverse = async ll => { const j = await (await fetch(`https://nominatim
 MAPS.search = osmSearch; MAPS.reverse = osmReverse;
 
 window.mapsReady = (async () => {
-  let cfg = { provider: 'osm' }; try { cfg = await (await fetch('/api/map-config')).json(); } catch {}
+  let cfg = { provider: 'osm' }; try { cfg = await (await fetch((window.ZIMOVA_API || '') + '/api/map-config')).json(); } catch {}
   if (cfg.provider !== 'google') return;
   try {
     await new Promise((res, rej) => { window.__gmReady = res; window.gm_authFailure = () => console.warn('Google Maps rejected the browser key (check API restrictions and billing).');

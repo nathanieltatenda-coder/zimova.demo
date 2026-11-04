@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ZIMOVA</string>
+    <string name="title_activity_main">ZIMOVA</string>
+    <string name="package_name">com.zimova.app</string>
+    <string name="custom_url_scheme">com.zimova.app</string>
+</resources>

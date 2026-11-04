@@ -9,7 +9,7 @@ let token = localStorage.getItem('zt'), me = null, timer = null, map = null, lay
 
 function toast(m) { const t = $('#toast'); t.textContent = m; t.className = 'show'; clearTimeout(toast.t); toast.t = setTimeout(() => t.className = '', 3800); }
 async function api(p, method = 'GET', body, hdrs = {}) {
-  const r = await fetch('/api' + p, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}), ...hdrs }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch((window.ZIMOVA_API || '') + '/api' + p, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}), ...hdrs }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Request failed'); return j;
 }
 const form = f => Object.fromEntries(new FormData(f));
@@ -39,7 +39,8 @@ function locate(auto) {   // passenger's current position, only after the browse
     () => { if (!auto) toast('Allow location access to use your current position'); }, { enableHighAccuracy: true, timeout: 10000 });
 }
 let watchId = null, lastSend = 0;
-function shareLoc(on) {   // driver position is sent only while a trip is active; the server also refuses it otherwise
+function shareLoc(on) {
+  if (window.ZNative && ZNative.tracking) { if (on) ZNative.startTracking(token); else ZNative.stopTracking(); return; }   // phone app: native background tracking   // driver position is sent only while a trip is active; the server also refuses it otherwise
   if (on && watchId === null && navigator.geolocation) watchId = navigator.geolocation.watchPosition(p => { if (Date.now() - lastSend < 4000) return; lastSend = Date.now();
     api('/driver/location', 'POST', { lat: p.coords.latitude, lng: p.coords.longitude }).catch(x => { if (x.message && /No active trip/.test(x.message)) shareLoc(false); }); },
     () => toast('Turn on location so your passenger can see you'), { enableHighAccuracy: true, maximumAge: 3000 });
@@ -86,7 +87,7 @@ function savedUI() {
 }
 views.share = async code => {   // public read-only live trip page
   main.innerHTML = `<div class="split"><aside class="card" id="panel"><h2>Live trip</h2><p class="hint">Loading…</p></aside><div id="map"></div></div>`; initMap(); let drawn = false;
-  const t = async () => { try { const s = await (await fetch('/api/share/' + code)).json(); if (s.error) throw 0;
+  const t = async () => { try { const s = await (await fetch((window.ZIMOVA_API || '') + '/api/share/' + code)).json(); if (s.error) throw 0;
     $('#panel').innerHTML = `<h2>${LABEL[s.status] || s.status}</h2><p class="hint">${esc(s.fromName)} → ${esc(s.toName)}</p>${s.driver ? `<div class="req"><b>${esc(s.driver.name)}</b><br>${esc(s.driver.vehicle.make)} ${esc(s.driver.vehicle.model)} · ${esc(s.driver.vehicle.reg)}</div>` : ''}<p class="sim">Shared by a ZIMOVA rider</p>`;
     if (!drawn && s.geometry) { drawn = true; drawBooking(s); } moveDriver(s.driverLoc);
   } catch { clearInterval(timer); $('#panel').innerHTML = '<h2>Link unavailable</h2><p class="hint">This trip link is invalid.</p>'; } };
@@ -155,7 +156,7 @@ function renderPlan() {
   <label>Destination</label><div class="row"><input id="toIn" placeholder="e.g. Bulawayo"><button class="btn sm" data-s="to">Search</button></div>
   <div id="extra"></div><div id="quoteBox" class="hint">Set both pins to see the road distance and fare.</div>
   <label>Payment method</label><select id="payM"><option value="ecocash">EcoCash</option><option value="visa">Visa</option><option value="mastercard">Mastercard</option></select>
-  <div id="saved" class="chips"></div><button class="btn" id="book" disabled>Book ride</button>`; savedUI(); drawExtra(); $('#loc').onclick = () => locate(false); if ($('#vp')) $('#vp').onclick = verifyPhone; if (!P.located) { P.located = true; locate(true); }
+  <div id="saved" class="chips"></div><button class="btn" id="book" disabled>Book ride</button>`; savedUI(); drawExtra(); $('#loc').onclick = () => locate(false); if ($('#vp')) $('#vp').onclick = verifyPhone; if ($('#ve')) $('#ve').onclick = verifyEmail; if (!P.located) { P.located = true; locate(true); }
   $$('[data-o]').forEach(b => b.onclick = () => { P.opt = b.dataset.o; $$('[data-o]').forEach(x => x.classList.toggle('on', x === b)); drawExtra(); if (P.quote) showQuote(); });
   $$('[data-s]').forEach(b => b.onclick = async () => {
     const q = $('#' + b.dataset.s + 'In').value.trim(); if (!q) return;
@@ -205,7 +206,7 @@ async function renderActive(b) {
   <p class="hint"><span class="badge">${typeLabel(b)}</span><br>${esc(b.fromName)} → ${esc(b.toName)}<br>${b.km} km · ~${b.etaMin} min</p>
   ${d ? `<div class="req"><b>${esc(d.name)}</b>${d.rating ? ` · ★ ${d.rating.avg}` : ''} · ${esc(d.phone)}<br>${esc(d.vehicle.make)} ${esc(d.vehicle.model)} · ${esc(d.vehicle.reg)}</div>` : '<p class="hint">Waiting for an approved, online driver to accept. (Open a driver account in another browser window to test.)</p>'}
   ${d ? `<p class="hint" id="drvloc">${b.driverLoc ? '📍 Driver location: live' : "Waiting for the driver's location…"}</p>` : ''}${b.pin && ['accepted', 'arrived'].includes(b.status) ? `<div class="pinbox"><span class="hint">${b.type === 'package' ? 'Collection code — the sender gives it to the driver' : 'Your ride PIN — tell it to your driver'}</span><b>${esc(b.pin)}</b></div>` : ''}${b.dcode && b.type === 'package' && b.status !== 'searching' ? `<div class="pinbox"><span class="hint">Delivery code — give it to the recipient</span><b>${esc(b.dcode)}</b></div>` : ''}${breakdown(b)}<br><div class="actions">${d ? '<button class="btn sm ghost" id="shr">Share trip</button><button class="btn sm red" id="sos">SOS</button>' : ''}<button class="btn red" id="cx">Cancel ride</button></div>`;
-  if ($('#shr')) { $('#shr').onclick = async () => { try { const { code } = await api(`/bookings/${b.id}/share`, 'POST'), url = location.origin + '/?share=' + code; try { await navigator.clipboard.writeText(url); toast('Live trip link copied'); } catch { prompt('Copy this link', url); } } catch (x) { toast(x.message); } };
+  if ($('#shr')) { $('#shr').onclick = async () => { try { const { code } = await api(`/bookings/${b.id}/share`, 'POST'), url = (window.ZIMOVA_WEB || location.origin) + '/?share=' + code; try { await navigator.clipboard.writeText(url); toast('Live trip link copied'); } catch { prompt('Copy this link', url); } } catch (x) { toast(x.message); } };
     $('#sos').onclick = async () => { if (!await confirmBox('Send an SOS alert?', 'ZIMOVA support will be alerted with your trip details and emergency contact. If you are in immediate danger, also contact local emergency services.', 'Send SOS')) return; try { await api(`/bookings/${b.id}/sos`, 'POST'); toast('Alert sent to ZIMOVA support. If you are in immediate danger, contact local emergency services.'); } catch (x) { toast(x.message); } }; }
   $('#cx').onclick = async () => { try { const f = await api(`/bookings/${b.id}/cancel-fee`);
     if (!await confirmBox('Cancel this ride?', f.feeC ? `Cancelling now carries a fee of ${money(f.feeC)} (free within ${f.graceSeconds}s of driver acceptance).` : 'No fee applies.', 'Cancel ride')) return;

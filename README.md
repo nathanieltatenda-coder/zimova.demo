@@ -16,15 +16,16 @@ Ride-hailing and delivery demo for Zimbabwe: private trips, shared trips, packag
 **Maps:** Google Maps when keys are set (search, satellite, Routes API fares, live driver tracking, navigation), OpenStreetMap otherwise. Setup is in the Google Maps section of this file.
 **Safety and admin:** phone verification, driver document checklist (ID, licence, vehicle registration, insurance) required before approval, complaints / incidents / disputes, passenger and driver suspension, reports, active-trip monitoring, audit log, notifications.
 **Premium UI:** splash screen, animated bottom navigation on phones, dark/light mode, animated counters and status stepper, driver-matching animation, success screens, skeleton loaders, smooth modals. Respects "reduce motion".
+**Phone apps (Android and iPhone):** a Capacitor wrapper in `mobile/` (generated `android/` and `ios/` projects, icons, build script) with push notifications and background driver tracking. Email and SMS verification, push sending and CORS are built on the server. Read `mobile/MOBILE.md` first.
 **Production foundations:** PostgreSQL option, atomic JSON saves with daily backups, security headers, rate limiting, idempotent booking requests, error log, `/healthz`, backup script, automated tests. See `DEPLOY.md`.
 
 ## Tests
-`npm test` runs 15 integration tests against the real server (payments, webhooks, refunds, payouts, town rules, shared/package flows, privacy, suspension...). For PostgreSQL: `DATABASE_URL=postgres://... npm test`.
+`npm test` runs 24 integration tests against the real server (payments, webhooks, refunds, payouts, town rules, shared/package flows, privacy, suspension, SMS/email/push sending, CORS, native location uploads). For PostgreSQL: `DATABASE_URL=postgres://... npm test`.
 
 ## Files
-**New:** `lib/store.js` (JSON/PostgreSQL storage), `lib/extra.js` (payments, notifications, verification, tickets, admin reports), `public/js/maps.js` (Google/OSM map layer), `public/js/ui.js` (premium UI and new screens), `tests/api.test.js`, `scripts/backup.js`, `PAYMENTS.md`, `DEPLOY.md`.
+**New:** `lib/store.js` (JSON/PostgreSQL storage), `lib/extra.js` (payments, notifications, verification, tickets, admin reports), `lib/messaging.js` (SMS, email, push senders), `mobile/` (Android/iPhone apps and `MOBILE.md`), `public/js/config.js`, `tests/messaging.test.js`, `public/js/maps.js` (Google/OSM map layer), `public/js/ui.js` (premium UI and new screens), `tests/api.test.js`, `scripts/backup.js`, `PAYMENTS.md`, `DEPLOY.md`.
 **Changed:** `server.js`, `public/index.html`, `public/css/styles.css`, `public/js/app.js`, `package.json`, `.env.example`, `.gitignore`, `README.md`.
-**Your data:** `data/db.json` is upgraded automatically on start (pricing resets to the new rates, approved drivers default to Harare with documents marked verified, passengers must verify their phone). Back it up first.
+**Your data:** `data/db.json` is upgraded automatically on start (pricing resets to the new rates, approved drivers default to Harare with documents marked verified, passengers must verify their phone and email). Back it up first.
 
 ## Google Maps setup
 Works with placeholders: with no keys the app uses OpenStreetMap. To switch on Google Maps:
@@ -36,7 +37,7 @@ The satellite option uses Google's own map type through the Maps JavaScript API 
 
 ## What still needs outside accounts or work
 - **Real payment provider** and its credentials, plus a signed-off way to pay drivers out (`PAYMENTS.md`).
-- **SMS provider** for phone codes. **Google Cloud keys** for Google Maps.
+- **SMS, email and push accounts** (adapters exist for Twilio / any JSON SMS API, SMTP and Firebase; none tried against real accounts). **Google Cloud keys** for Google Maps. **Apple and Google developer accounts** and a hosted HTTPS server for the phone apps (`mobile/MOBILE.md`). iPhone push needs one extra Firebase step.
 - **Driver document uploads** (needs file storage); today drivers enter numbers and an admin ticks the checklist.
 - **Native or installed app** for reliable background GPS tracking.
 - Real town boundaries, security review, device testing, load testing and legal/licensing checks (`DEPLOY.md`).

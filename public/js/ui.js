@@ -1,7 +1,7 @@
 // ZIMOVA premium UI layer: theme, splash, bottom navigation, modals, notifications, animated numbers, skeletons,
 // and the extra screens (Help & safety, Profile, Driver wallet) plus the extra admin tabs. Loaded after app.js.
 const sbxOn = () => !!(window.APPINFO && APPINFO.sandbox), sbx = t => sbxOn() ? t : '';
-fetch('/api/app-info').then(r => r.json()).then(j => { window.APPINFO = j; const d = $('.demo'); if (d && !j.sandbox) d.remove(); }).catch(() => {});
+fetch((window.ZIMOVA_API || '') + '/api/app-info').then(r => r.json()).then(j => { window.APPINFO = j; const d = $('.demo'); if (d && !j.sandbox) d.remove(); }).catch(() => {});
 const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // ---- theme (dark default, light optional)
@@ -34,10 +34,15 @@ const skel = (n = 3) => Array.from({ length: n }, () => '<div class="skel"></div
 function stepper(st) { const i = { searching: 0, accepted: 1, arrived: 2, in_progress: 3, completed: 4 }[st] ?? 0; return `<div class="stepper" style="--p:${i}">${['Requested', 'Matched', 'Arrived', 'On trip', 'Done'].map((t, k) => `<span class="${k <= i ? 'on' : ''}"><i></i><em>${t}</em></span>`).join('')}</div>`; }
 const matchingHtml = () => `<div class="radar"><i></i><i></i><i></i><b></b></div><p class="mtxt"><span>Contacting drivers in your town…</span><span>Checking who is closest…</span><span>Waiting for a driver to accept…</span></p>`;
 const successSvg = () => '<svg class="okmark" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="24"/><path d="M14 27l8 8 16-17"/></svg>';
-const phoneBanner = () => me.phoneVerified ? '' : `<div class="pinbox" style="text-align:left"><b style="font-size:14px;letter-spacing:0;color:var(--text)">Verify your phone to book</b><span class="hint">Drivers and ZIMOVA support need a number they can reach.</span><br><button class="btn sm" id="vp">Verify phone</button></div>`;
-async function verifyPhone() { try { const s = await api('/auth/phone/send', 'POST', {});
-  const code = await ask('Verify your phone', s.sandboxCode ? `Sandbox mode: no SMS is sent. Your code is ${s.sandboxCode}.` : 'Enter the 6-digit code we sent you.', { inputmode: 'numeric', max: 6 }); if (!code) return;
-  me = (await api('/auth/phone/verify', 'POST', { code })).user; toast('Phone verified'); P.key = null; if (P.mode) tickP(); else go('profile'); } catch (x) { toast(x.message); } }
+const phoneBanner = () => { const need = [!me.phoneVerified && ['vp', 'phone'], (window.APPINFO || {}).emailRequired !== false && !me.emailVerified && ['ve', 'email']].filter(Boolean); if (!need.length) return '';
+  return `<div class="pinbox" style="text-align:left"><b style="font-size:14px;letter-spacing:0;color:var(--text)">Verify your ${need.map(n => n[1]).join(' and ')} to book</b><span class="hint">Drivers and ZIMOVA support need to be able to reach you.</span><br>${need.map(n => `<button class="btn sm" id="${n[0]}">Verify ${n[1]}</button>`).join(' ')}</div>`; };
+async function verifyCode(kind) { try { const s = await api(`/auth/${kind}/send`, 'POST', {});
+  const code = await ask(`Verify your ${kind}`, s.sandboxCode ? `Sandbox mode: nothing is sent. Your code is ${s.sandboxCode}.` : (kind === 'phone' ? 'Enter the 6-digit code we sent by SMS.' : 'Enter the 6-digit code we emailed you.'), { inputmode: 'numeric', max: 6 }); if (!code) return;
+  me = (await api(`/auth/${kind}/verify`, 'POST', { code })).user; toast(kind === 'phone' ? 'Phone verified' : 'Email verified'); P.key = null; if (P.mode) tickP(); else go('profile'); } catch (x) { toast(x.message); } }
+const verifyPhone = () => verifyCode('phone'), verifyEmail = () => verifyCode('email');
+window.zGo = v => go(v); window.zHome = () => go(me ? { passenger: 'passenger', driver: 'driver', admin: 'admin' }[me.role] : 'welcome');
+window.zOpen = kind => { if (!me) return; go({ request: 'driver', trip: me.role === 'driver' ? 'driver' : 'passenger', payment: me.role === 'driver' ? 'earnings' : 'passenger', payout: 'earnings', support: 'help', account: 'profile' }[kind] || window.zHome());   // tapping a push notification opens the right screen
+};
 
 // ---- navigation: header on desktop, animated bottom bar on phones, notification bell
 const NAVS = { passenger: [['passenger', 'Book', '🚗'], ['history', 'Trips', '🧾'], ['help', 'Help', '💬'], ['profile', 'Profile', '👤']], driver: [['driver', 'Drive', '🚗'], ['earnings', 'Wallet', '💵'], ['help', 'Help', '💬'], ['profile', 'Profile', '👤']], admin: [['admin', 'Admin', '🛠️'], ['profile', 'Profile', '👤']] };
@@ -48,11 +53,14 @@ window.nav = function nav() {
   n.innerHTML = L.map(([v, t]) => `<button class="btn sm ghost deskonly" data-v="${v}">${t}</button>`).join('') + `<button class="icon" id="bell" aria-label="Notifications">🔔<span id="bdg" hidden></span></button>` + themeBtn() + `<button class="btn sm" id="out">Sign out</button>`;
   b.className = 'show'; b.style.setProperty('--n', L.length); b.innerHTML = L.map(([v, t, i]) => `<button data-v="${v}"><span class="ic">${i}</span>${t}</button>`).join('');
   $$('[data-v]', n).concat($$('[data-v]', b)).forEach(x => x.onclick = () => go(x.dataset.v));
-  $('#out').onclick = () => { token = null; me = null; localStorage.removeItem('zt'); go('welcome'); }; wireTheme(); wireNote(); markNav();
+  $('#out').onclick = async () => { try { if (window.ZNative) await ZNative.onLogout(token); } catch {} token = null; me = null; localStorage.removeItem('zt'); go('welcome'); }; wireTheme(); wireNote(); markNav(); if (window.ZNative) ZNative.onLogin(token);   // phone app: register for push once signed in
 };
 function markNav() { const L = me && NAVS[me.role]; if (!L) return; const i = Math.max(0, L.findIndex(x => x[0] === window.curView)); $$('[data-v]').forEach(x => x.classList.toggle('on', x.dataset.v === window.curView)); $('#bnav').style.setProperty('--i', i); }
+const seenNotes = new Set(); let primedNotes = false;
 function wireNote() {
-  const bell = $('#bell'); if (!bell) return; const poll = async () => { try { const r = await api('/notifications'); const g = $('#bdg'); if (g) { g.hidden = !r.unread; g.textContent = r.unread > 9 ? '9+' : r.unread; } return r; } catch {} };
+  const bell = $('#bell'); if (!bell) return; const poll = async () => { try { const r = await api('/notifications'); const g = $('#bdg'); if (g) { g.hidden = !r.unread; g.textContent = r.unread > 9 ? '9+' : r.unread; }
+    if (window.ZNative && !ZNative.pushOk) { r.items.filter(x => !x.read && !seenNotes.has(x.id)).forEach(x => { seenNotes.add(x.id); if (primedNotes) ZNative.localNotify('ZIMOVA', x.text); }); primedNotes = true; }   // no push yet: still alert while the app is open
+    return r; } catch {} };
   poll(); wireNote.t = setInterval(poll, 15000);
   bell.onclick = async e => { e.stopPropagation(); const old = $('.notes'); if (old) return old.remove(); const r = await poll() || { items: [] }; const d = document.createElement('div'); d.className = 'notes';
     d.innerHTML = `<h4>Notifications</h4>` + (r.items.map(x => `<div class="note ${x.read ? '' : 'new'}"><span>${esc(x.text)}</span><em>${new Date(x.at).toLocaleString()}</em></div>`).join('') || '<p class="hint">Nothing yet. Updates about your trips and payments appear here.</p>'); document.body.appendChild(d);
@@ -80,13 +88,13 @@ views.help = async () => {
 views.profile = async () => {
   me = (await api('/me')).user; const e = me.emergency || {}, v = me.driver && me.driver.vehicle;
   main.innerHTML = `<div class="grid2"><form class="card" id="pf"><h2>My profile</h2><label>Full name</label><input name="name" value="${esc(me.name)}" required><label>Phone ${me.phoneVerified ? '<span class="badge ok">verified</span>' : '<span class="badge bad">not verified</span>'}</label><input name="phone" value="${esc(me.phone)}" required>
-    ${me.role === 'passenger' && !me.phoneVerified ? '<button class="btn sm" type="button" id="vp">Verify phone</button><br>' : ''}<label>Email</label><input value="${esc(me.email)}" disabled>
+    ${!me.phoneVerified ? '<button class="btn sm" type="button" id="vp">Verify phone</button><br>' : ''}<label>Email ${me.emailVerified ? '<span class="badge ok">verified</span>' : '<span class="badge bad">not verified</span>'}</label><input value="${esc(me.email)}" disabled>${me.emailVerified ? '' : '<button class="btn sm" type="button" id="ve">Verify email</button><br>'}
     ${me.role === 'passenger' ? `<label>Preferred payment method</label><select name="prefMethod"><option value="ecocash">EcoCash</option><option value="visa">Visa</option><option value="mastercard">Mastercard</option></select><p class="hint">Card numbers are never stored by ZIMOVA. Payments go through the payment provider.</p>` : ''}
     <h3>Emergency contact</h3><input name="en" placeholder="Name" value="${esc(e.name || '')}"><input name="ep" placeholder="Phone" value="${esc(e.phone || '')}"><p class="hint">Included in SOS alerts so support can reach someone you trust.</p><button class="btn">Save profile</button></form>
     ${v ? `<section class="card"><h2>Driver details</h2><p>${esc(v.make)} ${esc(v.model)} ${v.year} · ${esc(v.reg)} · ${v.capacity} seats</p><p>Approved town: <b>${esc(me.townName || '—')}</b></p><p>Status: <span class="badge">${me.status}</span></p><p class="hint">Documents verified by ZIMOVA: ${Object.entries((me.driver.verified) || {}).map(([k, x]) => `${k} ${x ? '✓' : '✗'}`).join(' · ')}</p></section>` : ''}
     <section class="card"><h2>Appearance</h2><p class="hint">Switch between dark and light mode.</p><button class="btn ghost" id="thm2">Toggle dark / light</button></section></div>`;
   if ($('[name=prefMethod]')) $('[name=prefMethod]').value = me.prefMethod || 'ecocash';
-  if ($('#vp')) $('#vp').onclick = verifyPhone; $('#thm2').onclick = () => { setTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light'); wireTheme(); nav(); };
+  if ($('#vp')) $('#vp').onclick = verifyPhone; if ($('#ve')) $('#ve').onclick = verifyEmail; $('#thm2').onclick = () => { setTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light'); wireTheme(); nav(); };
   $('#pf').onsubmit = async ev => { ev.preventDefault(); const f = form(ev.target); try { me = (await api('/profile', 'PUT', { name: f.name, phone: f.phone, prefMethod: f.prefMethod, emergency: { name: f.en, phone: f.ep } })).user; toast('Profile saved'); nav(); go('profile'); } catch (x) { toast(x.message); } };
 };
 

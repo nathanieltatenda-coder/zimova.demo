@@ -1,0 +1,10 @@
+{
+  "appId": "com.zimova.app",
+  "appName": "ZIMOVA",
+  "webDir": "www",
+  "server": { "androidScheme": "https" },
+  "plugins": {
+    "SplashScreen": { "launchShowDuration": 800, "backgroundColor": "#0a0a0a", "showSpinner": false },
+    "PushNotifications": { "presentationOptions": ["badge", "sound", "alert"] }
+  }
+}

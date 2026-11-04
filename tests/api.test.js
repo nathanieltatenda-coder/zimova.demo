@@ -9,7 +9,8 @@ const until = async (f, ms = 8000) => { const t0 = Date.now(); while (Date.now()
 const A = { lat: -17.83, lng: 31.05 }, Z = { lat: -17.9, lng: 31.1 }, base = { from: A, to: Z, fromName: 'a', toName: 'b', pay: 'ecocash', type: 'private' };
 let n = 0;
 async function pax(name = 'Test Pax') { const k = ++n, r = await call('/auth/register', 'POST', { name, phone: '07712' + String(1000 + k), email: `p${k}@x.zw`, password: 'password1' }); const t = r.j.token;
-  const s = await call('/auth/phone/send', 'POST', {}, t); await call('/auth/phone/verify', 'POST', { code: s.j.sandboxCode }, t); return t; }
+  const s = await call('/auth/phone/send', 'POST', {}, t); await call('/auth/phone/verify', 'POST', { code: s.j.sandboxCode }, t);
+  const e = await call('/auth/email/send', 'POST', {}, t); await call('/auth/email/verify', 'POST', { code: e.j.sandboxCode }, t); return t; }
 async function drvAccount(townId, email) { const r = await call('/auth/driver-register', 'POST', { name: 'Drv ' + townId, phone: '0772000000', email, password: 'password1', driver: { idNumber: 'F-12345', idExpiry: '2031-01-01', licenceNumber: 'F-DL1', licenceExpiry: '2031-01-01', insuranceNumber: 'INS-1234', insuranceExpiry: '2031-01-01', regBook: 'RB-1', settlement: 'ecocash', townId, docsConfirmed: true, vehicle: { make: 'Honda', model: 'Fit', year: 2018, reg: 'T ' + townId, capacity: 4 } } });
   assert.equal(r.s, 200, JSON.stringify(r.j)); return r.j; }
 async function trip(P, D, over = {}) { const bk = await call('/bookings', 'POST', { ...base, ...over }, P); assert.equal(bk.s, 200, JSON.stringify(bk.j)); const id = bk.j.id;

@@ -29,7 +29,7 @@ process.on('uncaughtException', e => logErr('uncaught', e.stack || e)); process.
 const bad = (m, s = 400) => Object.assign(new Error(m), { status: s });
 const wrap = f => async (req, res) => { try { await f(req, res); } catch (e) { if (!e.status) logErr('route', e.stack || String(e), { path: req.path }); res.status(e.status || 500).json({ error: e.status ? e.message : 'Server error' }); } };
 const str = (v, min = 1, max = 100) => typeof v === 'string' && v.trim().length >= min && v.length <= max;
-const pub = ({ salt, hash, otp, ...r }) => ({ ...r, ...(r.townId ? { townName: (db.towns.find(t => t.id === r.townId) || {}).name } : {}) });
+const pub = ({ salt, hash, otp, eotp, devices, ...r }) => ({ ...r, ...(r.townId ? { townName: (db.towns.find(t => t.id === r.townId) || {}).name } : {}) });
 // ---- towns / service areas (polygons are [lat,lng] pairs). Seeded shapes are rough ~10-25 km circles for the demo; refine in Admin > Towns.
 const circle = (lat, lng, r) => Array.from({ length: 12 }, (_, i) => { const t = i * Math.PI / 6; return [+(lat + r * Math.sin(t)).toFixed(4), +(lng + r * Math.cos(t) / 0.95).toFixed(4)]; });
 const SEED_TOWNS = [['Harare', -17.83, 31.05, .25], ['Bulawayo', -20.15, 28.58, .2], ['Mutare', -18.97, 32.67, .12], ['Gweru', -19.45, 29.82, .12], ['Masvingo', -20.07, 30.83, .1],
@@ -68,7 +68,8 @@ const auth = (...roles) => (req, res, next) => {
   req.user = u; next();
 };
 const audit = (u, action, detail) => { db.audit.push({ at: Date.now(), by: u.email, action, detail }); };
-const notify = (uid, text, kind = 'info') => { if (!uid || !text) return; (db.notes = db.notes || []).push({ id: 'n' + (++db.seq), userId: uid, text, kind, at: Date.now(), read: false }); if (db.notes.length > 3000) db.notes.splice(0, 500); };
+let pushHook = null;
+const notify = (uid, text, kind = 'info') => { if (!uid || !text) return; (db.notes = db.notes || []).push({ id: 'n' + (++db.seq), userId: uid, text, kind, at: Date.now(), read: false }); if (db.notes.length > 3000) db.notes.splice(0, 500); if (pushHook) pushHook(uid, text, kind); };
 const docsOk = u => { const v = (u.driver || {}).verified || {}; return v.id && v.licence && v.vehicle && v.insurance; };
 
 // ---- fares (server is authoritative)
@@ -110,6 +111,9 @@ const security = (req, res, next) => {
   if (process.env.NODE_ENV === 'production') res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   if (process.env.NODE_ENV === 'production' && process.env.FORCE_HTTPS === '1' && req.headers['x-forwarded-proto'] === 'http') return res.redirect(301, 'https://' + req.headers.host + req.originalUrl); next();
 };
+const ORIGINS = (process.env.CORS_ORIGINS || 'capacitor://localhost,https://localhost,http://localhost,ionic://localhost').split(',').map(x => x.trim());   // the phone apps' WebView origins
+const cors = (req, res, next) => { const o = req.headers.origin;
+  if (o && ORIGINS.includes(o)) { res.setHeader('Access-Control-Allow-Origin', o); res.setHeader('Vary', 'Origin'); res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key'); res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS'); res.setHeader('Access-Control-Max-Age', '600'); if (req.method === 'OPTIONS') return res.sendStatus(204); } next(); };
 const hits = new Map(); setInterval(() => { const n = Date.now(); for (const [k, v] of hits) if (v.r < n) hits.delete(k); }, 60000).unref();
 const rate = (req, res, next) => { if (req.path.startsWith('/webhooks')) return next(); const n = Date.now(); let h = hits.get(req.ip); if (!h || h.r < n) { h = { n: 0, r: n + 60000 }; hits.set(req.ip, h); }
   if (++h.n > (+process.env.RATE_LIMIT || 600)) return res.status(429).json({ error: 'Too many requests. Slow down.' }); next(); };
@@ -118,7 +122,7 @@ const idem = (req, res, next) => { const k = req.method === 'POST' && req.path =
   const key = (req.headers.authorization || '') + '|' + String(k).slice(0, 80), hit = idemCache.get(key); if (hit && hit.at > Date.now() - 6e5) return res.status(hit.s).json(hit.b);
   const j = res.json.bind(res); res.json = b => { idemCache.set(key, { s: res.statusCode, b, at: Date.now() }); if (idemCache.size > 2000) idemCache.delete(idemCache.keys().next().value); return j(b); }; next(); };
 const app = express(); app.disable('x-powered-by'); if (process.env.TRUST_PROXY) app.set('trust proxy', 1);
-app.use(security); app.use('/api', rate); app.use('/api/bookings', idem); app.use(express.json({ limit: '100kb', verify: (req, res, buf) => { req.raw = buf; } })); app.use(express.static(path.join(__dirname, 'public')));
+app.use(security); app.use('/api', cors); app.use('/api', rate); app.use('/api/bookings', idem); app.use(express.json({ limit: '100kb', verify: (req, res, buf) => { req.raw = buf; } })); app.use(express.static(path.join(__dirname, 'public')));
 app.get('/healthz', async (req, res) => { try { await store.ping(); res.json({ ok: true, store: store.kind, uptimeS: Math.round(process.uptime()) }); } catch (e) { res.status(503).json({ ok: false }); } });
 const tries = {};
 app.post('/api/auth/login', wrap((req, res) => {
@@ -157,7 +161,8 @@ app.get('/api/me', auth(), (req, res) => res.json({ user: pub(req.user) }));
 app.get('/api/config', auth(), (req, res) => res.json(db.config));
 app.get('/api/map-config', (req, res) => res.json(process.env.GOOGLE_MAPS_BROWSER_KEY ? { provider: 'google', key: process.env.GOOGLE_MAPS_BROWSER_KEY } : { provider: 'osm' }));
 app.post('/api/driver/location', auth('driver'), wrap((req, res) => {   // only accepted while the driver has an active trip
-  const p = { lat: +req.body.lat, lng: +req.body.lng }; if (!inZW(p)) throw bad('Location outside Zimbabwe');
+  const p = { lat: +(req.body.lat ?? req.body.latitude), lng: +(req.body.lng ?? req.body.longitude) }; if (!inZW(p))   // accepts the app's native background uploads (latitude/longitude) too
+   throw bad('Location outside Zimbabwe');
   if (!db.bookings.some(b => b.driverId === req.user.id && ['accepted', 'arrived', 'in_progress'].includes(b.status))) { delete LOC[req.user.id]; return res.status(409).json({ error: 'No active trip. Location sharing has stopped.', stop: true }); }
   LOC[req.user.id] = { ...p, at: Date.now() }; res.json({ ok: true });
 }));
@@ -207,6 +212,7 @@ function matchGroup(a, z, townId) {   // compatible route: pickups within 3 km, 
 }
 app.post('/api/bookings', auth('passenger'), wrap(async (req, res) => {
   if (!req.user.phoneVerified) throw bad('Please verify your phone number first (Profile > Verify phone).', 403);
+  if (process.env.REQUIRE_EMAIL_VERIFICATION !== '0' && !req.user.emailVerified) throw bad('Please verify your email address first (Profile > Verify email).', 403);
   const [a, z] = pts(req.body), b = req.body, tn = townAt(a); if (!tn) throw bad(NOTOWN, 422);
   if (!['ecocash', 'visa', 'mastercard'].includes(b.pay)) throw bad('Choose a payment method');
   if (db.bookings.some(x => x.passengerId === req.user.id && LIVE.includes(x.status))) throw bad('You already have an active booking', 409);
@@ -215,7 +221,9 @@ app.post('/api/bookings', auth('passenger'), wrap(async (req, res) => {
   const bo = { id: 'b' + (++db.seq), passengerId: req.user.id, from: a, to: z, fromName: String(b.fromName || '').slice(0, 120), toName: String(b.toName || '').slice(0, 120),
     status: 'searching', type, ...extra, townId: tn.id, pin: String(crypto.randomInt(1000, 10000)), etaMin: r.min, geometry: r.geometry, ...f, payment: { status: 'unpaid', method: b.pay, simulated: true }, createdAt: Date.now() };
   if (type === 'shared') { const m = matchGroup(a, z, tn.id); bo.groupId = m ? m.gid : bo.id; if (m && m.driverId) { bo.driverId = m.driverId; bo.acceptedAt = Date.now(); bo.status = 'accepted'; } }
-  db.bookings.push(bo); save(); res.json({ ...view(bo), pin: bo.pin, dcode: bo.dcode });
+  db.bookings.push(bo);
+  if (!bo.driverId) db.users.filter(u => u.role === 'driver' && u.status === 'approved' && u.online && u.townId === tn.id).forEach(u => notify(u.id, `New ${type === 'package' ? 'delivery' : 'ride'} request in ${tn.name}: ${b.fromName} → ${b.toName}`, 'request'));
+  save(); res.json({ ...view(bo), pin: bo.pin, dcode: bo.dcode });
 }));
 app.get('/api/bookings', auth(), (req, res) => {
   const u = req.user; let l = db.bookings;
@@ -358,7 +366,7 @@ app.get('/api/admin/alerts', A, (req, res) => res.json((db.alerts || []).slice()
 
 store.init().then(loaded => {
   load(loaded); migrate();
-  require('./lib/extra')({ app, D: () => db, save, auth, A, wrap, bad, str, audit, notify, view, bk, pub, PORT, logErr, store });
+  require('./lib/extra')({ setPush: f => { pushHook = f; }, msg: require('./lib/messaging'), app, D: () => db, save, auth, A, wrap, bad, str, audit, notify, view, bk, pub, PORT, logErr, store });
   const server = app.listen(PORT, () => console.log(`ZIMOVA running at http://localhost:${PORT}  (storage: ${store.kind}, payments: ${process.env.PAYMENT_PROVIDER || 'sandbox'})`));
   const stop = async () => { server.close(); await store.flush(); process.exit(0); }; process.on('SIGTERM', stop); process.on('SIGINT', stop);
 }).catch(e => { logErr('startup', e.stack || e); process.exit(1); });
