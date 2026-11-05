@@ -4,8 +4,9 @@
   "description": "ZIMOVA - Move Your Way. Ride-hailing web app for Zimbabwe (Milestone 1).",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test tests/api.test.js tests/messaging.test.js",
-    "backup": "node scripts/backup.js"
+    "test": "node --test tests/api.test.js tests/messaging.test.js tests/golive.test.js",
+    "backup": "node scripts/backup.js",
+    "golive": "node scripts/golive.js"
   },
   "engines": {
     "node": ">=18"

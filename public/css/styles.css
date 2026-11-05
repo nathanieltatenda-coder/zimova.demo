@@ -107,3 +107,5 @@ nav .btn.on,.deskonly.on{background:var(--gold);color:#000}
 .bars{display:flex;gap:8px;align-items:flex-end;height:130px;padding-top:8px}.bars>div{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%}.bars i{display:block;width:100%;max-width:34px;height:var(--h);min-height:3px;background:linear-gradient(var(--gold),#7a5f12);border-radius:5px 5px 0 0;transform-origin:bottom;animation:grow .8s var(--ease) both}.bars em{font-size:10px;font-style:normal;color:var(--mute);margin-top:4px}.bars.wide{gap:4px}@keyframes grow{from{transform:scaleY(0)}}
 .wallet b.num{font-size:20px}.tabs{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px}.tabs .btn{white-space:nowrap}
 @media(prefers-reduced-motion:reduce){#splash{animation:none}.sp-bar i,.mtxt span{animation:none}.mtxt span:first-child{opacity:1}}
+
+.setup{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px;margin:8px 0 18px}.setup>div{border:1px solid var(--line);border-radius:10px;padding:9px 11px}

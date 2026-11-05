@@ -1,7 +1,7 @@
 @echo off
 cd /d "%~dp0"
 echo =====================================
-echo  ZIMOVA - Move Your Way (Web Demo)
+echo  ZIMOVA - Move Your Way
 echo =====================================
 echo.
 where node >nul 2>nul
@@ -19,6 +19,12 @@ if not exist node_modules (
     pause
     exit /b 1
   )
+)
+if not exist .env if not exist data\db.json (
+  copy .env.example .env >nul
+  echo First start: a settings file called .env was created.
+  echo In Notepad set ADMIN_EMAIL and ADMIN_PASSWORD, save, then close Notepad.
+  notepad .env
 )
 echo.
 echo Starting ZIMOVA. Keep this window open while using the website.

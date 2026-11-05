@@ -21,7 +21,7 @@ const hook = async (o, bad) => { const { raw, sig } = sign(o); const r = await f
 
 before(async () => {
   osrm = http.createServer((q, r) => { r.setHeader('content-type', 'application/json'); r.end(JSON.stringify({ code: 'Ok', routes: [{ distance: 10000, duration: 600, geometry: { coordinates: [[31.05, -17.83], [31.1, -17.9]] } }] })); }).listen(0);
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'zimova-')); const env = { ...process.env, PORT, DATA_DIR: tmp, OSRM_URL: `http://127.0.0.1:${osrm.address().port}`, PAYMENT_WEBHOOK_SECRET: SECRET, SANDBOX_WEBHOOK_MS: '150', RATE_LIMIT: '100000', ADMIN_PASSWORD: 'admin123' };
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'zimova-')); const env = { ...process.env, PORT, DATA_DIR: tmp, OSRM_URL: `http://127.0.0.1:${osrm.address().port}`, PAYMENT_WEBHOOK_SECRET: SECRET, SANDBOX_WEBHOOK_MS: '150', RATE_LIMIT: '100000', ADMIN_PASSWORD: 'admin123', SEED_DEMO: '1' };
   delete env.GOOGLE_MAPS_SERVER_KEY; srv = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env, stdio: 'ignore' });
   await until(async () => { try { return (await fetch(B + '/healthz')).ok; } catch { return false; } }, 20000);
   admin = (await call('/auth/login', 'POST', { email: 'admin@zimova.test', password: 'admin123' })).j.token; drv = (await call('/auth/login', 'POST', { email: 'driver@zimova.test', password: 'driver123' })).j.token; await call('/driver/online', 'POST', { online: true }, drv);

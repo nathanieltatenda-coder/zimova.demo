@@ -7,7 +7,7 @@ const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLen
 const sent = { twilio: [], http: [], mail: [], fcm: [], auth: [] }, dead = 'dead-token-0000000000';
 let apps = [], fakeSvc, smtp, osrm, P1, P2, A, ADMIN;
 const startApp = async env => { const port = 3700 + Math.floor(Math.random() * 400), tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'zm-'));
-  const proc = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env: { ...process.env, PORT: port, DATA_DIR: tmp, RATE_LIMIT: '100000', ADMIN_PASSWORD: 'admin123', PAYMENT_WEBHOOK_SECRET: 'x', ...env }, stdio: 'ignore' });
+  const proc = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env: { ...process.env, PORT: port, DATA_DIR: tmp, RATE_LIMIT: '100000', ADMIN_PASSWORD: 'admin123', PAYMENT_WEBHOOK_SECRET: 'x', SEED_DEMO: '1', DATABASE_URL: '', ...env }, stdio: 'ignore' });
   const B = `http://127.0.0.1:${port}`; for (let i = 0; i < 100; i++) { try { if ((await fetch(B + '/healthz')).ok) break; } catch {} await sleep(150); }
   const call = async (p, m = 'GET', body, t, h = {}) => { const r = await fetch(B + '/api' + p, { method: m, headers: { 'Content-Type': 'application/json', ...(t ? { Authorization: 'Bearer ' + t } : {}), ...h }, body: body ? JSON.stringify(body) : undefined }); return { s: r.status, j: await r.json().catch(() => ({})), h: r.headers }; };
   const app = { port, B, call, stop: () => proc.kill() }; apps.push(app); return app; };

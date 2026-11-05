@@ -2,12 +2,12 @@
 
 Ride-hailing and delivery demo for Zimbabwe: private trips, shared trips, package delivery and rides for someone else, with town-restricted drivers, electronic payments only and an automatic 90% driver / 10% ZIMOVA split.
 
-> **Status: working demo, not production-ready.** Payments run in a **sandbox** (no real money), SMS codes are shown on screen, and Google Maps is optional. Read "What still needs outside accounts" below.
+> **Status: ready for real accounts, payments in TEST MODE.** No demo accounts or demo text remain. Emails and phone numbers are real (you must add email/SMS providers, see `GOLIVE.md`). **Payments are simulated: no real money is charged or paid out**, and the app says so. It is not fully production-ready until the checklist in `DEPLOY.md` is done.
 
 ## Quick start
-- Windows: double-click `START_ZIMOVA_WINDOWS.bat`. Anywhere: `npm install` then `npm start`, open http://localhost:3000.
-- Demo logins: `driver@zimova.test` / `driver123` (Harare) and `admin@zimova.test` / `admin123`. Register a passenger on the welcome page; verify the phone (the sandbox code appears on screen).
-- Optional settings: copy `.env.example` to `.env`.
+- Copy `.env.example` to `.env` and set `ADMIN_EMAIL` and `ADMIN_PASSWORD` (the server will not start the first time without them). Windows: double-click `START_ZIMOVA_WINDOWS.bat`, which creates `.env` and opens it. Anywhere: `npm install`, `npm start`, open http://localhost:3000.
+- Upgrading a database that has old test data? Read `GOLIVE.md` and run `npm run golive` (stop the server first).
+- Real users need the site hosted online with HTTPS and email/SMS providers: `GOLIVE.md` and `DEPLOY.md`.
 
 ## What is included
 **Booking:** Private ($1/km), Shared ($0.90/km per passenger, consent + route matching), Package (collection and delivery codes, banned-item checks), For someone else. Real road-distance fares, ride PIN, share-trip link, SOS, ratings with comments.
@@ -20,12 +20,12 @@ Ride-hailing and delivery demo for Zimbabwe: private trips, shared trips, packag
 **Production foundations:** PostgreSQL option, atomic JSON saves with daily backups, security headers, rate limiting, idempotent booking requests, error log, `/healthz`, backup script, automated tests. See `DEPLOY.md`.
 
 ## Tests
-`npm test` runs 24 integration tests against the real server (payments, webhooks, refunds, payouts, town rules, shared/package flows, privacy, suspension, SMS/email/push sending, CORS, native location uploads). For PostgreSQL: `DATABASE_URL=postgres://... npm test`.
+`npm test` runs 30 integration tests against the real server (payments, webhooks, refunds, payouts, town rules, shared/package flows, privacy, suspension, SMS/email/push sending, CORS, native location uploads). For PostgreSQL: `DATABASE_URL=postgres://... npm test`.
 
 ## Files
-**New:** `lib/store.js` (JSON/PostgreSQL storage), `lib/extra.js` (payments, notifications, verification, tickets, admin reports), `lib/messaging.js` (SMS, email, push senders), `mobile/` (Android/iPhone apps and `MOBILE.md`), `public/js/config.js`, `tests/messaging.test.js`, `public/js/maps.js` (Google/OSM map layer), `public/js/ui.js` (premium UI and new screens), `tests/api.test.js`, `scripts/backup.js`, `PAYMENTS.md`, `DEPLOY.md`.
+**New:** `GOLIVE.md`, `scripts/golive.js`, `tests/golive.test.js`, `lib/store.js` (JSON/PostgreSQL storage), `lib/extra.js` (payments, notifications, verification, tickets, admin reports), `lib/messaging.js` (SMS, email, push senders), `mobile/` (Android/iPhone apps and `MOBILE.md`), `public/js/config.js`, `tests/messaging.test.js`, `public/js/maps.js` (Google/OSM map layer), `public/js/ui.js` (premium UI and new screens), `tests/api.test.js`, `scripts/backup.js`, `PAYMENTS.md`, `DEPLOY.md`.
 **Changed:** `server.js`, `public/index.html`, `public/css/styles.css`, `public/js/app.js`, `package.json`, `.env.example`, `.gitignore`, `README.md`.
-**Your data:** `data/db.json` is upgraded automatically on start (pricing resets to the new rates, approved drivers default to Harare with documents marked verified, passengers must verify their phone and email). Back it up first.
+**Your data:** `data/db.json` is upgraded automatically on start (pricing resets to the new rates, approved drivers default to Harare with documents marked verified, passengers must verify their phone and email). Old `@zimova.test` demo accounts are only removed by `npm run golive`. Back it up first.
 
 ## Google Maps setup
 Works with placeholders: with no keys the app uses OpenStreetMap. To switch on Google Maps:

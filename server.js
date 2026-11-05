@@ -1,4 +1,4 @@
-// ZIMOVA Milestone 1 server. JSON-file storage (demo only) -> replace with PostgreSQL in Milestone 3.
+// ZIMOVA server (Express). Storage: JSON file or PostgreSQL (lib/store.js). Payments run through lib/extra.js.
 const express = require('express'), crypto = require('crypto'), fs = require('fs'), path = require('path');
 try { fs.readFileSync(path.join(__dirname, '.env'), 'utf8').split(/\r?\n/).forEach(l => { const m = l.match(/^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$/); if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^["']|["']$/g, ''); }); } catch {}   // minimal .env loader
 const PORT = process.env.PORT || 3000, OSRM = process.env.OSRM_URL || 'https://router.project-osrm.org';
@@ -14,23 +14,25 @@ function addUser(o, pw) {
 }
 function load(loaded) {
   if (loaded) { db = loaded; return; }
-  db = { secret: crypto.randomBytes(32).toString('hex'), seq: 0, users: [], bookings: [], txns: [], audit: [],
-    config: { base: 0.5, perKm: 0.4, min: 1.5, mult: { economy: 1, comfort: 1.35, suv: 1.7 },
-      serviceFeePct: 5, commissionPct: 5, cancelFee: 0.5, graceSeconds: 120 } };
-  addUser({ name: 'ZIMOVA Admin', email: process.env.ADMIN_EMAIL || 'admin@zimova.test', phone: '0000000', role: 'admin' }, process.env.ADMIN_PASSWORD || 'admin123');
-  addUser({ name: 'Demo Driver', email: 'driver@zimova.test', phone: '0771000000', role: 'driver', status: 'approved', online: false,
-    driver: { idNumber: 'FICTIONAL-001', idExpiry: '2030-01-01', licenceNumber: 'FICTIONAL-DL1', licenceExpiry: '2030-01-01',
-      vehicle: { make: 'Toyota', model: 'Aqua', year: 2016, reg: 'DEMO 1234', capacity: 4 }, settlement: 'ecocash', docsConfirmed: true } }, 'driver123');
+  const demo = process.env.SEED_DEMO === '1';   // only the automated tests use demo accounts
+  const ae = (process.env.ADMIN_EMAIL || '').trim().toLowerCase(), ap = process.env.ADMIN_PASSWORD || '';
+  if (!demo && (!/^\S+@\S+\.\S+$/.test(ae) || ap.length < 10 || !/\d/.test(ap) || !/[a-z]/i.test(ap) || /change-this|password/i.test(ap))) {
+    console.error('\nFirst start: ZIMOVA needs the owner (admin) account details.\nCreate a file named .env (copy .env.example) and set:\n  ADMIN_EMAIL=your real email address\n  ADMIN_PASSWORD=a strong password (10+ characters with letters and numbers)\nThen start again. You can change the password later in Profile.\n'); process.exit(1);
+  }
+  db = { secret: crypto.randomBytes(32).toString('hex'), seq: 0, users: [], bookings: [], txns: [], audit: [], config: { base: 0, perKm: 1, sharedPerKm: 0.9, packagePerKm: 1, min: 1, mult: { private: 1 }, serviceFeePct: 0, commissionPct: 10, cancelFee: 0.5, graceSeconds: 120 } };
+  addUser({ name: process.env.ADMIN_NAME || 'ZIMOVA Admin', email: demo ? (ae || 'admin@zimova.test') : ae, phone: process.env.ADMIN_PHONE || '0000000', role: 'admin', emailVerified: true, phoneVerified: true }, demo ? (ap || 'admin123') : ap);
+  if (demo) addUser({ name: 'Test Driver', email: 'driver@zimova.test', phone: '0771000000', role: 'driver', status: 'approved', online: false, driver: { idNumber: 'T-001', idExpiry: '2030-01-01', licenceNumber: 'T-DL1', licenceExpiry: '2030-01-01', vehicle: { make: 'Toyota', model: 'Aqua', year: 2016, reg: 'TEST 1234', capacity: 4 }, settlement: 'ecocash', docsConfirmed: true } }, 'driver123');
   save();
 }
+
 const logErr = (type, msg, extra = {}) => { const line = JSON.stringify({ at: new Date().toISOString(), type, msg: String(msg).slice(0, 2000), ...extra }); console.error(line);
   try { fs.mkdirSync(path.join(__dirname, 'logs'), { recursive: true }); fs.appendFileSync(path.join(__dirname, 'logs', 'error.log'), line + '\n'); } catch {} };
 process.on('uncaughtException', e => logErr('uncaught', e.stack || e)); process.on('unhandledRejection', e => logErr('unhandled', (e && e.stack) || e));
 const bad = (m, s = 400) => Object.assign(new Error(m), { status: s });
 const wrap = f => async (req, res) => { try { await f(req, res); } catch (e) { if (!e.status) logErr('route', e.stack || String(e), { path: req.path }); res.status(e.status || 500).json({ error: e.status ? e.message : 'Server error' }); } };
 const str = (v, min = 1, max = 100) => typeof v === 'string' && v.trim().length >= min && v.length <= max;
-const pub = ({ salt, hash, otp, eotp, devices, ...r }) => ({ ...r, ...(r.townId ? { townName: (db.towns.find(t => t.id === r.townId) || {}).name } : {}) });
-// ---- towns / service areas (polygons are [lat,lng] pairs). Seeded shapes are rough ~10-25 km circles for the demo; refine in Admin > Towns.
+const pub = ({ salt, hash, otp, eotp, rcode, devices, ...r }) => ({ ...r, ...(r.townId ? { townName: (db.towns.find(t => t.id === r.townId) || {}).name } : {}) });
+// ---- towns / service areas (polygons are [lat,lng] pairs). Seeded shapes are rough ~10-25 km circles; draw the real town limits in Admin > Towns.
 const circle = (lat, lng, r) => Array.from({ length: 12 }, (_, i) => { const t = i * Math.PI / 6; return [+(lat + r * Math.sin(t)).toFixed(4), +(lng + r * Math.cos(t) / 0.95).toFixed(4)]; });
 const SEED_TOWNS = [['Harare', -17.83, 31.05, .25], ['Bulawayo', -20.15, 28.58, .2], ['Mutare', -18.97, 32.67, .12], ['Gweru', -19.45, 29.82, .12], ['Masvingo', -20.07, 30.83, .1],
   ['Kwekwe', -18.93, 29.81, .1], ['Chinhoyi', -17.36, 30.2, .1], ['Karoi', -16.81, 29.69, .08], ['Kariba', -16.52, 28.8, .08]].map(([name, la, ln, r]) => ({ id: name.toLowerCase(), name, active: true, polygon: circle(la, ln, r) }));
@@ -62,7 +64,7 @@ function verify(t) {
 }
 const auth = (...roles) => (req, res, next) => {
   const p = verify((req.headers.authorization || '').slice(7)), u = p && db.users.find(x => x.id === p.id);
-  if (!u) return res.status(401).json({ error: 'Please sign in' });
+  if (!u || (p.tv || 0) !== (u.tv || 0)) return res.status(401).json({ error: 'Please sign in' });
   if (u.status === 'suspended') return res.status(403).json({ error: 'Account suspended' });
   if (roles.length && !roles.includes(u.role)) return res.status(403).json({ error: 'Not allowed' });
   req.user = u; next();
@@ -132,7 +134,7 @@ app.post('/api/auth/login', wrap((req, res) => {
   const h = u && hash(String(req.body.password || ''), u.salt);
   if (!u || !crypto.timingSafeEqual(Buffer.from(h), Buffer.from(u.hash))) throw bad('Wrong email or password', 401);
   if (u.status === 'suspended') throw bad('Account suspended', 403);
-  res.json({ token: sign({ id: u.id, exp: Date.now() + 7 * 864e5 }), user: pub(u) });
+  res.json({ token: sign({ id: u.id, tv: u.tv || 0, exp: Date.now() + 7 * 864e5 }), user: pub(u) });
 }));
 function register(role) {
   return wrap((req, res) => {
@@ -147,19 +149,45 @@ function register(role) {
       if (!str(d.insuranceNumber, 4, 40) || !fut(d.insuranceExpiry) || !str(d.regBook, 3, 40)) throw bad('Insurance policy number and expiry, and the vehicle registration book number, are required');
       if (!['ecocash', 'bank', 'card'].includes(d.settlement)) throw bad('Choose a settlement method');
       const tw = db.towns.find(t => t.id === d.townId && t.active); if (!tw) throw bad('Choose your operating town');
-      if (d.docsConfirmed !== true) throw bad('Confirm that the sample (fictional) documents are attached');
+      if (d.docsConfirmed !== true) throw bad('Confirm that your document details are correct and that you can show the documents when asked');
       o.status = 'pending'; o.online = false; o.townId = tw.id;
       o.driver = { idNumber: d.idNumber.trim(), idExpiry: d.idExpiry, licenceNumber: d.licenceNumber.trim(), licenceExpiry: d.licenceExpiry,
         vehicle: { make: v.make.trim(), model: v.model.trim(), year: +v.year, reg: v.reg.trim(), capacity: +v.capacity }, settlement: d.settlement, insuranceNumber: d.insuranceNumber.trim(), insuranceExpiry: d.insuranceExpiry, regBook: d.regBook.trim(), verified: { id: false, licence: false, vehicle: false, insurance: false }, docsConfirmed: true };
     }
-    const u = addUser(o, b.password); save(); res.json({ token: sign({ id: u.id, exp: Date.now() + 7 * 864e5 }), user: pub(u) });
+    const u = addUser(o, b.password); save(); res.json({ token: sign({ id: u.id, tv: u.tv || 0, exp: Date.now() + 7 * 864e5 }), user: pub(u) });
   });
 }
 app.post('/api/auth/register', register('passenger'));
+// ---- password change and reset by email code. Changing it bumps the token version, which signs out every other device.
+const newPw = (p, cur) => { if (typeof p !== 'string' || p.length < 8 || p.length > 100) throw bad('New password must be 8 to 100 characters'); if (p === cur) throw bad('Choose a different password'); return p; };
+app.post('/api/auth/password', auth(), wrap((req, res) => {
+  const u = req.user, cur = String(req.body.current || ''), h = hash(cur, u.salt); if (!crypto.timingSafeEqual(Buffer.from(h), Buffer.from(u.hash))) throw bad('Current password is wrong', 403);
+  const pw = newPw(req.body.password, cur); u.salt = crypto.randomBytes(16).toString('hex'); u.hash = hash(pw, u.salt); u.tv = (u.tv || 0) + 1; audit(u, 'password_change', u.email); save();
+  res.json({ token: sign({ id: u.id, tv: u.tv, exp: Date.now() + 7 * 864e5 }), user: pub(u) });
+}));
+const mailer = require('./lib/messaging');
+app.post('/api/auth/forgot', wrap(async (req, res) => {
+  const n = tries['f' + req.ip] = (tries['f' + req.ip] || []).filter(t => t > Date.now() - 6e4); if (n.length >= 5) throw bad('Too many attempts. Wait a minute.', 429); n.push(Date.now());
+  const prov = process.env.EMAIL_PROVIDER || 'sandbox', prod = process.env.NODE_ENV === 'production'; if (prov === 'sandbox' && prod) throw bad('Password reset by email is not set up yet. Please contact ZIMOVA support.', 503);
+  const u = db.users.find(x => x.email === String(req.body.email || '').toLowerCase().trim()), o = (u && u.rcode) || {};
+  if (!u || u.status === 'suspended' || (o.sentAt && Date.now() - o.sentAt < 30e3) || (o.log || []).filter(t => t > Date.now() - 36e5).length >= 5) return res.json({ sent: true });   // same answer whether or not the account exists
+  const code = String(crypto.randomInt(100000, 1000000));
+  u.rcode = { hash: crypto.createHash('sha256').update(code + u.id + 'reset').digest('hex'), exp: Date.now() + 15 * 60e3, sentAt: Date.now(), tries: 0, log: [...(o.log || []).filter(t => t > Date.now() - 36e5), Date.now()] };
+  if (prov === 'sandbox') { save(); return res.json({ sent: true, sandboxCode: code }); }
+  try { await mailer.sendEmail(u.email, 'Reset your ZIMOVA password', `Your ZIMOVA password reset code is ${code}. It expires in 15 minutes.\n\nIf you did not ask for this, ignore this message: your password has not changed.`); } catch (e) { logErr('reset-mail', e.message); }
+  save(); res.json({ sent: true });
+}));
+app.post('/api/auth/reset', wrap((req, res) => {
+  const n = tries['r' + req.ip] = (tries['r' + req.ip] || []).filter(t => t > Date.now() - 6e4); if (n.length >= 10) throw bad('Too many attempts. Wait a minute.', 429); n.push(Date.now());
+  const u = db.users.find(x => x.email === String(req.body.email || '').toLowerCase().trim()), o = u && u.rcode; if (!u || !o || o.exp < Date.now()) throw bad('Code expired or invalid. Ask for a new one.', 400);
+  if (++o.tries > 5) { delete u.rcode; save(); throw bad('Too many wrong attempts. Ask for a new code.', 429); }
+  if (crypto.createHash('sha256').update(String(req.body.code || '') + u.id + 'reset').digest('hex') !== o.hash) { save(); throw bad('Wrong code', 400); }
+  const pw = newPw(req.body.password); u.salt = crypto.randomBytes(16).toString('hex'); u.hash = hash(pw, u.salt); u.tv = (u.tv || 0) + 1; u.emailVerified = true; delete u.rcode; audit(u, 'password_reset', u.email); save(); res.json({ ok: true });
+}));
 app.post('/api/auth/driver-register', register('driver'));
 app.get('/api/me', auth(), (req, res) => res.json({ user: pub(req.user) }));
 app.get('/api/config', auth(), (req, res) => res.json(db.config));
-app.get('/api/map-config', (req, res) => res.json(process.env.GOOGLE_MAPS_BROWSER_KEY ? { provider: 'google', key: process.env.GOOGLE_MAPS_BROWSER_KEY } : { provider: 'osm' }));
+app.get('/api/map-config', (req, res) => res.json(process.env.GOOGLE_MAPS_BROWSER_KEY ? { provider: 'google', key: process.env.GOOGLE_MAPS_BROWSER_KEY, mapId: process.env.GOOGLE_MAPS_MAP_ID || 'DEMO_MAP_ID' } : { provider: 'osm' }));
 app.post('/api/driver/location', auth('driver'), wrap((req, res) => {   // only accepted while the driver has an active trip
   const p = { lat: +(req.body.lat ?? req.body.latitude), lng: +(req.body.lng ?? req.body.longitude) }; if (!inZW(p))   // accepts the app's native background uploads (latitude/longitude) too
    throw bad('Location outside Zimbabwe');
@@ -211,7 +239,7 @@ function matchGroup(a, z, townId) {   // compatible route: pickups within 3 km, 
   }
 }
 app.post('/api/bookings', auth('passenger'), wrap(async (req, res) => {
-  if (!req.user.phoneVerified) throw bad('Please verify your phone number first (Profile > Verify phone).', 403);
+  if (process.env.REQUIRE_PHONE_VERIFICATION !== '0' && !req.user.phoneVerified) throw bad('Please verify your phone number first (Profile > Verify phone).', 403);
   if (process.env.REQUIRE_EMAIL_VERIFICATION !== '0' && !req.user.emailVerified) throw bad('Please verify your email address first (Profile > Verify email).', 403);
   const [a, z] = pts(req.body), b = req.body, tn = townAt(a); if (!tn) throw bad(NOTOWN, 422);
   if (!['ecocash', 'visa', 'mastercard'].includes(b.pay)) throw bad('Choose a payment method');
@@ -267,7 +295,7 @@ app.post('/api/bookings/:id/cancel', auth('passenger', 'driver'), wrap((req, res
     if (b.passengerId !== u.id) throw bad('Not allowed', 403);
     const feeC = cancelFee(b);
     notify(b.driverId, 'The passenger cancelled the trip.', 'trip');
-    b.status = 'cancelled'; b.cancel = { by: 'passenger', at: Date.now(), reason, feeC, waived: false, payment: feeC ? 'owed (simulated, not charged)' : 'n/a' };
+    b.status = 'cancelled'; b.cancel = { by: 'passenger', at: Date.now(), reason, feeC, waived: false, payment: feeC ? 'owed (cancellation fee, not collected)' : 'n/a' };
   } else {                                              // driver cancels: no passenger fee, ride goes back to the pool
     if (b.driverId !== u.id) throw bad('Not allowed', 403);
     (b.cancelLog = b.cancelLog || []).push({ by: 'driver', at: Date.now(), reason, feeC: 0 });

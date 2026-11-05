@@ -1,5 +1,5 @@
 // ZIMOVA map layer. With a Google browser key (served by /api/map-config) the app uses Google Maps;
-// otherwise it uses Leaflet + OpenStreetMap so the demo still works. app.js talks to one small API:
+// otherwise it uses Leaflet + OpenStreetMap so the app still works without Google keys. app.js talks to one small API:
 // L.* (Leaflet-compatible subset), MAPS.search(text), MAPS.reverse({lat,lng}), MAPS.google.
 window.MAPS = { google: false };
 const osmSearch = async q => { const r = await (await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=zw&q=' + encodeURIComponent(q))).json(); return r[0] ? { lat: +r[0].lat, lng: +r[0].lon } : null; };
@@ -10,7 +10,7 @@ window.mapsReady = (async () => {
   let cfg = { provider: 'osm' }; try { cfg = await (await fetch((window.ZIMOVA_API || '') + '/api/map-config')).json(); } catch {}
   if (cfg.provider !== 'google') return;
   try {
-    await new Promise((res, rej) => { window.__gmReady = res; window.gm_authFailure = () => console.warn('Google Maps rejected the browser key (check API restrictions and billing).');
+    await new Promise((res, rej) => { window.__gmMapId = cfg.mapId; window.__gmReady = res; window.gm_authFailure = () => console.warn('Google Maps rejected the browser key (check API restrictions and billing).');
       const s = document.createElement('script'); s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(cfg.key)}&v=weekly&loading=async&callback=__gmReady`; s.onerror = rej; document.head.appendChild(s); });
     await Promise.all(['maps', 'marker', 'places', 'geocoding'].map(l => google.maps.importLibrary(l)));
     install(); MAPS.google = true;
@@ -24,7 +24,7 @@ function install() {
   window.L = {
     latLng: (a, b) => ll(a, b), divIcon: o => o, tileLayer: () => ({ addTo() { return this; } }),
     map(id) {
-      const m = new google.maps.Map(document.getElementById(id), { center: { lat: -19, lng: 29.8 }, zoom: 6, minZoom: 5, mapId: 'DEMO_MAP_ID', disableDefaultUI: true, zoomControl: true, gestureHandling: 'greedy', clickableIcons: false,
+      const m = new google.maps.Map(document.getElementById(id), { center: { lat: -19, lng: 29.8 }, zoom: 6, minZoom: 5, mapId: window.__gmMapId || 'DEMO_MAP_ID', disableDefaultUI: true, zoomControl: true, gestureHandling: 'greedy', clickableIcons: false,
         colorScheme: google.maps.ColorScheme ? google.maps.ColorScheme.DARK : undefined, restriction: { latLngBounds: { north: -14.5, south: -24, west: 24, east: 34 }, strictBounds: false } });
       const api = { _m: m, setView(c, z) { m.setCenter(ll(c)); if (z) m.setZoom(z); return api; }, fitBounds(b) { m.fitBounds(b, 40); return api; },
         on(ev, cb) { if (ev === 'click') m.addListener('click', e => cb({ latlng: { lat: e.latLng.lat(), lng: e.latLng.lng() } })); return api; },
